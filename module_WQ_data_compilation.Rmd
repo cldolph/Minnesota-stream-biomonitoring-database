@@ -1,0 +1,744 @@
+---
+title: "WQ_data_compilation"
+author: "Christy Dolph"
+date: "2025-04-24"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Overview
+
+The goal of this script is to assemble water chemistry data for streams in the Twin Cities Metro. Data is assembled from multiple public data respositories including:
+
+-   Water Quality Portal
+
+-   MetCouncil EIMS portal
+
+Ultimately we are planning to match this water chemistry data to locations where biological data (macroinvertebrate diversity & abundancy) has also been collected.
+
+## Workspace setup
+
+Load required packages and create directories
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+#Clean up workspace and load packages (or install if necessary)
+
+#rm(list=ls())
+want <- c('here', 'data.table', 'tidyverse','tidyr', 'readxl','readr', 'purrr', 'writexl', 'mapview', 'sf', 'terra', 'tmap','geodata', 'RSelenium', 'rvest', 'httr', 'dataRetrieval', 'DT', 'FedData', 'raster', 'rgdal', 'nhdplusTools', 'tigris', 'janitor', 'oce', 'utm2lonlat')
+          
+          need <- want[!(want %in% installed.packages()[,"Package"])]
+if (length(need)) install.packages(need)
+lapply(want, function(i) require(i, character.only=TRUE))
+rm(want, need)
+
+
+#Set up working directories
+
+#Create input and output folder destinations, if they don't already exist:
+dir.create(file.path(getwd(), "Water_chemistry_datasets"))
+
+
+dir <- list()
+root.dir <- getwd() #Set Main Directory one level up
+list.files(root.dir)
+
+#Data Directory:
+data.dir <- paste0(root.dir, "/Data/biodata_raw/TC_Metro/Compiled_data_clean") 
+data.dir
+
+#GIS directory
+gis.dir<-paste0(root.dir, "/Data/GIS")
+gis.dir
+
+#Map images directory
+maps.dir<-paste0(root.dir, "/Maps")
+maps.dir
+
+#Water chem directory
+dir.chem <- paste0(root.dir, "/Data/water_chemistry")
+dir.chem
+
+#Output data
+dir.output<-paste0(root.dir, "/Data/biodata_processed")
+dir.output
+```
+
+# Water Quality Portal
+
+Water Quality Portal User Guide: <https://www.waterqualitydata.us/portal_userguide/>
+
+Look at available list of water quality parameters. For now prioritize the following:
+
+-   Chloride
+
+-   Nitrogen
+
+-   Phosphorus
+
+-   Suspended sediment
+
+-   Lead
+
+-   PCBs
+
+```{r}
+#Read in all parameter codes available in NWIS
+pcode <- readNWISpCode("all")
+
+#Look at all codes:
+#View(pcode)
+
+#Check categories of codes
+levels(factor(pcode$parameter_group_nm))
+
+#Pull out water chemistry related codes of interest
+
+#want suspended sediment but not necessarily other rows with "sediment"
+  
+ChemCds<-pcode %>% 
+  filter(grepl("nitrogen|nitrate|phosphorus|chloride|lead|PCBs|`Suspended sediment`", parameter_nm, ignore.case = TRUE)) %>% 
+  filter(!parameter_group_nm=="Radiochemical") #filter out radiochem
+
+View(ChemCds)
+
+names(ChemCds)
+
+#Option to view available P parameters in a table (as HTML table using DT package):
+datatable(ChemCds[, c("parameter_cd", "parameter_nm", "parameter_units")],
+  rownames = FALSE, options = list(pageLength = 4))
+```
+
+## Further narrow down to parameter codes of interest:
+
+These parameters were selecting by viewing the 'ChemCds' table (see above chunk), and handpicking parameters.
+
+Some of these parameters seem to be redundant? Need to figure out how they are different and if some of them can be combined. Possible reasons:
+
+-   different units
+
+-   different lab/analytical methods
+
+-   some are estimates from regression, vs sampled directly
+
+Notes:
+
+-   Pulling parameter codes for water, and in some cases bed sediment.
+
+-   I am not pulling chemistry for different suspended/bed sediment size fractions, but this is available.
+
+-   There are a lot of codes for specific metals chemistry in bed sediment (full metals workup) that I have not included here (only including lead).
+
+-   I excluded parameter codes for loads (ie, lbs per day).
+
+-   Most water chemistry has filtered and unfiltered option, need to figure out which you want.
+
+```{r}
+
+parameter_code=c('00600',
+'00602',
+'00605',
+'00607',
+'00608',
+'00610',
+'00613',
+'00615',
+'00618',
+'00620',
+'00630',
+'00631',
+'00665',
+'00666',
+'00667',
+'00668',
+'00670',
+'00671',
+'00673',
+'00674',
+'00676',
+'00940',
+'01049',
+'01050',
+'01051',
+'01052',
+'01072',
+'01382',
+'01388',
+'01407',
+'01473',
+'04116',
+'29836',
+'30272',
+'30291',
+'30292',
+'30335',
+'30362',
+'39516',
+'39517',
+'39518',
+'39519',
+'49567',
+'49568',
+'51185',
+'51288',
+'52286',
+'52298',
+'52635',
+'52683',
+'62854',
+'62855',
+'64832',
+'65043',
+'70387',
+'70507',
+'71850',
+'71851',
+'71886',
+'71887',
+'71888',
+'90869',
+'91001',
+'91003',
+'91004',
+'99117',
+'99120',
+'99121',
+'99123',
+'99124',
+'99125',
+'99130',
+'99133',
+'99220',
+'99404',
+'99410',
+'99411',
+'99412',
+'99414',
+'99415',
+'99416',
+'99435',
+'99889',
+'99891',
+'99892',
+'99893',
+'99894')
+
+```
+
+## Pull out WQP data for streams in MN
+
+<https://cran.r-project.org/web/packages/dataRetrieval/vignettes/dataRetrieval.html>
+
+"statecode" is FIPS state codes: <https://www.waterqualitydata.us/portal_userguide/>
+
+Minnesota FIPS code is 27
+
+```{r}
+ 
+#search by state
+
+Water.chem<-readWQPdata(statecode=c("US:27"), 
+          siteType="Stream",
+          sampleMedia="Water",
+          parameterCd=parameter_code)
+View(Water.chem)
+```
+
+## ID site locations in study area where water chem was collected
+
+```{r}
+#get site info
+sites<-whatWQPsites(statecode=c("US:27"), 
+          siteType="Stream",
+          sampleMedia="Water",
+          parameterCd=parameter_code)
+#View(sites)
+```
+
+## Create spatial object and plot map
+
+```{r}
+names(sites)
+WQP_sites_sf<-st_as_sf(sites, coords=c("LongitudeMeasure", "LatitudeMeasure"), crs=4326)
+
+
+#read in USA state boundaries using tigris package
+states<-states()
+states_sf <- st_as_sf(states) #convert to sf object
+st_bbox(states_sf) #bounding box
+states_sf
+
+st_crs(states_sf) #check reference system
+
+#Project riparian TP samples in NAD83 to match state boundaries
+WQP_sites_NAD83<-st_transform(WQP_sites_sf, crs=st_crs(states_sf))
+
+#Plot riparian TP soil sample locations
+tmap_mode("view")
+
+tm_shape(WQP_sites_NAD83) +
+  tm_dots()+
+  tm_shape(states_sf)+
+  tm_borders()
+```
+
+### Limit sites to Twin Cities Metro Area
+
+```{r}
+#read in county boundaries for MN using tigris package
+counties <-counties("Minnesota")
+head(counties)
+names(counties)
+
+st_crs(counties) #check coordinate reference system 
+
+
+#Create list of counties in TC Metro 
+Metro.List<-c("Anoka", "Carver", "Dakota", "Hennepin", "Ramsey", "Scott", "Washington")
+
+#Filter county shapefile to TC Metro only 
+TC.Metro.counties<-counties %>% 
+  filter(NAME %in% Metro.List)
+
+#Clip water chem data to metro
+WQP_sites_TC<-st_intersection(WQP_sites_NAD83, TC.Metro.counties)
+
+#Write to file so can intersect with biomonitoring data
+st_write(WQP_sites_TC, paste(gis.dir, "/WQP_waterchem_TCMetro.shp", sep=""), append=FALSE)
+
+#Plot data to see if it looks OK:
+
+tm_shape(TC.Metro.counties)+
+  tm_borders()+
+tm_shape(WQP_sites_TC)+
+  tm_dots(fill="orange")
+```
+
+Clip WQP points to TC Metro:
+
+```{r}
+WQP.TCMetro.sites<-st_intersection(WQP_sites_NAD83, TC.Metro.counties)
+
+#Number of TC Metro area sites:
+nrow(WQP.TCMetro.sites)
+
+tm_shape(TC.Metro.counties)+
+  tm_borders()+
+tm_shape(WQP.TCMetro.sites)+
+  tm_dots()
+
+```
+
+## Merge water chem data to site ID
+
+Site ID is "MonitoringLocationIdentifier"
+
+```{r}
+names(sites)
+
+names(Water.chem)
+
+#For all of MN, merge water chem to site info, leaving out redundant info between tables: 
+WQP.chem.sites<-merge(sites, (Water.chem %>% dplyr::select(!c(OrganizationIdentifier, OrganizationFormalName, ProviderName))), by=c("MonitoringLocationIdentifier"))
+names(WQP.chem.sites)
+
+#Merge to detailed information for water chem parameters
+ChemCds<-ChemCds %>% 
+  dplyr::mutate(CharacteristicName=srsname) %>% 
+  dplyr::mutate(USGSPCode=parameter_cd)
+View(ChemCds)
+
+nrow(WQP.chem.sites)
+
+WQP.chem.sites.specific<-merge(WQP.chem.sites, ChemCds %>% dplyr::select(!c(CharacteristicName)), by=c("USGSPCode"))
+nrow(WQP.chem.sites.specific)
+
+names(WQP.chem.sites.specific)
+#View(WQP.chem.sites.specific)
+
+##############################################
+#For TC Metro:
+#ID Metro Sites
+names(WQP.TCMetro.sites)
+
+Metro.sites<-WQP.TCMetro.sites %>% 
+  st_drop_geometry %>% 
+  dplyr::select(MonitoringLocationIdentifier) %>%
+  distinct() %>% 
+  as.list()
+
+#Water chem for Metro sites:
+WQP.chem.TCMetro<-WQP.chem.sites.specific %>% 
+  filter(MonitoringLocationIdentifier %in% Metro.sites$MonitoringLocationIdentifier)
+
+nrow(WQP.chem.TCMetro)
+
+```
+
+## Examine WQP water chemistry data
+
+Look at how much data there is by parameter and site.
+
+This dataset contains repeated measurements over time and space.
+
+Notes:
+
+-   Be careful with "CharacteristicName" as this is a very general category that lumps together different types of parameters
+
+```{r}
+names(WQP.chem.TCMetro)
+
+
+#Look at number of samples collected by each site and parameter:
+View(WQP.chem.TCMetro %>% 
+  group_by(MonitoringLocationIdentifier, parameter_nm, ResultMeasure.MeasureUnitCode, USGSPCode) %>% 
+  count())
+
+
+#Check on dates of specific parameters
+
+
+```
+
+Number of sites sampled \>5 times for a given parameter
+
+```{r}
+names(WQP.chem.TCMetro)
+
+View(WQP.chem.TCMetro %>% 
+  group_by(MonitoringLocationIdentifier, parameter_nm, ResultMeasure.MeasureUnitCode, USGSPCode) %>% 
+  count() %>% 
+  filter(n>5) %>% 
+  ungroup() %>% 
+  dplyr::select(MonitoringLocationIdentifier) %>% 
+  distinct())
+
+#78 sites sampled >5 sites for at least 1 parameter
+```
+
+Most common parameters sampled across sites (but retain different parameter codes)
+
+```{r}
+View(WQP.chem.TCMetro %>% 
+  group_by(parameter_nm, ResultMeasure.MeasureUnitCode, USGSPCode) %>% 
+  count()) 
+```
+
+### Combining WQP parameters
+
+Information on parameters: <https://help.waterdata.usgs.gov/codes-and-parameters/parameters>
+
+One approach: combine constituents if they have the exact same parameter name, even if parameter codes differ (may be discrepancies in how these were measured??)
+
+```{r}
+#Look at specific constituent as an example
+
+View(ChemCds %>% 
+  filter(parameter_nm=="Phosphorus, water, unfiltered, milligrams per liter as phosphorus"))
+
+#Look at most common parameters across sites, if parameter names match (disregarding codes)
+View(WQP.chem.TCMetro %>% 
+  group_by(parameter_nm, ResultMeasure.MeasureUnitCode) %>% 
+  count()) 
+
+```
+
+# Getting Data from Met Council: EIMS
+
+The Met Council data portal is called EIMS: <https://eims.metc.state.mn.us/AdvancedSearch>
+
+Options for accessing data:
+
+1.  Download data from the portal, and then load it into R - file name includes access date
+2.  Use the web link for the search query to load it directly into R (tho note this creates additional formatting issues)
+
+To pull data for all sites:
+
+-   Search by watershed (huc8): select all 11 watersheds
+
+-   site type = stream/river
+
+-   leave date range open for all dates
+
+-   parameters - select individually otherwise data is too large to download from the portal.
+
+    -   Parameters selected: nutrients, inorganics, organics, physical
+
+EIMS query for nutrients:
+
+[https://eims.metc.state.mn.us/Download?startDate=01-01-0001&endDate=12-31-9999&parameterIds=2037;2038;2039;2163;2164;2221;2222;2223;2224;2225;2226;2172;2173;2231;2232;2233;2234;2235&siteTypes=River/Stream&majorWatersheds=Blue%20Earth%20River;Cannon%20River;Le%20Sueur%20River;Lower%20Minnesota%20River;Lower%20St.%20Croix%20River;Minnesota%20River%20-%20Mankato;Mississippi%20River%20-%20Lake%20Pepin;Mississippi%20River%20-%20Twin%20Cities;North%20Fork%20Crow%20River;Rum%20River;South%20Fork%20Crow%20River&shortSiteIds=\\\~0INn9wla-;E1FTFrJdB5DxCOBKJuD7C6MmJ7J_EbN0GFJ1EDEHJwF6EqN2JfFYFHDOJqFQNnElDEJlGBEvJeJnJ9JoFmCtEPFeFJFcEUJsEYDpDjBqDmB4DdJrDaBDDXMACjNKBmNZCLKODtNYJ8NWCiDDDfFwFNJ3MoCZCkCNCxDLDIDiM8M6NcNMDNJ6DuNLDcNTMZM5DMLxM4NJN9NONILTM9GSGQE0M2NSNAHLNHNPNCNRNDNN;&format=csv](https://eims.metc.state.mn.us/Download?startDate=01-01-0001&endDate=12-31-9999&parameterIds=2037;2038;2039;2163;2164;2221;2222;2223;2224;2225;2226;2172;2173;2231;2232;2233;2234;2235&siteTypes=River/Stream&majorWatersheds=Blue%20Earth%20River;Cannon%20River;Le%20Sueur%20River;Lower%20Minnesota%20River;Lower%20St.%20Croix%20River;Minnesota%20River%20-%20Mankato;Mississippi%20River%20-%20Lake%20Pepin;Mississippi%20River%20-%20Twin%20Cities;North%20Fork%20Crow%20River;Rum%20River;South%20Fork%20Crow%20River&shortSiteIds=~0INn9wla-;E1FTFrJdB5DxCOBKJuD7C6MmJ7J_EbN0GFJ1EDEHJwF6EqN2JfFYFHDOJqFQNnElDEJlGBEvJeJnJ9JoFmCtEPFeFJFcEUJsEYDpDjBqDmB4DdJrDaBDDXMACjNKBmNZCLKODtNYJ8NWCiDDDfFwFNJ3MoCZCkCNCxDLDIDiM8M6NcNMDNJ6DuNLDcNTMZM5DMLxM4NJN9NONILTM9GSGQE0M2NSNAHLNHNPNCNRNDNN;&format=csv){.uri}
+
+EIMS query for inorganics:
+
+[https://eims.metc.state.mn.us/Download?startDate=01-01-0001&endDate=12-31-9999&parameterIds=2074;2075;2151;2152;2192;2193;2205;2206;2056;2077;2085;2086;2087;2120;2121;2122;2202;2209;2210;2217;2218;2219;2036;2045;2054;2055;2072;2073;2099;2100;2276;2109;2110;2142;2144;2145;2148;2149;2153;2154;2155;2156;2158;2161;2162;2203;2204;2214;2215;2249;2250;2041;2042;2043;2044;2067;2111;2200;2201&siteTypes=River/Stream&majorWatersheds=Blue%20Earth%20River;Cannon%20River;Le%20Sueur%20River;Lower%20Minnesota%20River;Lower%20St.%20Croix%20River;Minnesota%20River%20-%20Mankato;Mississippi%20River%20-%20Lake%20Pepin;Mississippi%20River%20-%20Twin%20Cities;North%20Fork%20Crow%20River;Rum%20River;South%20Fork%20Crow%20River&shortSiteIds=\\\~nI0Nawl9-;BKCODOElEbDxC6B5JuEqEvD7E1EDGFEPN9N2N0NnFrJwDEDpDjDaDfFmMmFTFYCiNJMZF6JoBDB4DXDIJfJrCjCtNZCZBqCkNWDMDcJdEHFcCNCxMoDNJqJlGBDiDmKOJeJsJnE0J9J3FQJ1DtFNJ8J_DdLxNcJ7DuNMNNFJMANLEYFeEUGSFHFwGQM8NCNKM2M6NDM4NIM9NOLTNTM5J6NHNSDlNPNABmNYCLDDNRHL;&format=csv](https://eims.metc.state.mn.us/Download?startDate=01-01-0001&endDate=12-31-9999&parameterIds=2074;2075;2151;2152;2192;2193;2205;2206;2056;2077;2085;2086;2087;2120;2121;2122;2202;2209;2210;2217;2218;2219;2036;2045;2054;2055;2072;2073;2099;2100;2276;2109;2110;2142;2144;2145;2148;2149;2153;2154;2155;2156;2158;2161;2162;2203;2204;2214;2215;2249;2250;2041;2042;2043;2044;2067;2111;2200;2201&siteTypes=River/Stream&majorWatersheds=Blue%20Earth%20River;Cannon%20River;Le%20Sueur%20River;Lower%20Minnesota%20River;Lower%20St.%20Croix%20River;Minnesota%20River%20-%20Mankato;Mississippi%20River%20-%20Lake%20Pepin;Mississippi%20River%20-%20Twin%20Cities;North%20Fork%20Crow%20River;Rum%20River;South%20Fork%20Crow%20River&shortSiteIds=~nI0Nawl9-;BKCODOElEbDxC6B5JuEqEvD7E1EDGFEPN9N2N0NnFrJwDEDpDjDaDfFmMmFTFYCiNJMZF6JoBDB4DXDIJfJrCjCtNZCZBqCkNWDMDcJdEHFcCNCxMoDNJqJlGBDiDmKOJeJsJnE0J9J3FQJ1DtFNJ8J_DdLxNcJ7DuNMNNFJMANLEYFeEUGSFHFwGQM8NCNKM2M6NDM4NIM9NOLTNTM5J6NHNSDlNPNABmNYCLDDNRHL;&format=csv){.uri}
+
+EIMS query for organics:
+
+[https://eims.metc.state.mn.us/Download?startDate=01-01-0001&endDate=12-31-9999&parameterIds=2001;2002;2003;2004;2005;2006;2007;2010;2011;2016;2017;2018;2019;2020;2021;2023;2024;2028;2030;2033;2034;2040;2047;2048;2049;2050;2051;2052;2053;2057;2058;2059;2060;2068;2069;2071;2076;2089;2090;2091;2101;2113;2114;2116;2117;2118;2119;2129;2132;2133;2139;2140;2141;2143;2146;2150;2157;2159;2160;2165;2166;2167;2168;2169;2175;2176;2187;2188;2195;2213;2216;2227;2228;2230;2238;2241;2242;2247;2177;2178;2179;2180;2181;2182;2183;2229;2008;2009;2012;2013;2014;2015;2022;2025;2026;2027;2029;2031;2032;2035;2046;2070;2084;2088;2102;2112;2115;2124;2125;2126;2127;2128;2134;2136;2137;2138;2184;2237;2239&siteTypes=River/Stream&majorWatersheds=Blue%20Earth%20River;Cannon%20River;Le%20Sueur%20River;Lower%20Minnesota%20River;Lower%20St.%20Croix%20River;Minnesota%20River%20-%20Mankato;Mississippi%20River%20-%20Lake%20Pepin;Mississippi%20River%20-%20Twin%20Cities;North%20Fork%20Crow%20River;Rum%20River;South%20Fork%20Crow%20River&shortSiteIds=\\\~0nINwl-;EbD7DOBKC6DxB5E1EvCOEqN0MZElFYJwDtJnFrDdJlJ1EPGFFmF6JoFcEDFTDNKOJdDpGBFQFHJuMmDjJ9JeEHCiJsDfJfCkDIMoDaJqNWJ3NnNLN2N9DMNMJ7BqLxFwFeM6BDB4NZCxCZ;&format=csv](https://eims.metc.state.mn.us/Download?startDate=01-01-0001&endDate=12-31-9999&parameterIds=2001;2002;2003;2004;2005;2006;2007;2010;2011;2016;2017;2018;2019;2020;2021;2023;2024;2028;2030;2033;2034;2040;2047;2048;2049;2050;2051;2052;2053;2057;2058;2059;2060;2068;2069;2071;2076;2089;2090;2091;2101;2113;2114;2116;2117;2118;2119;2129;2132;2133;2139;2140;2141;2143;2146;2150;2157;2159;2160;2165;2166;2167;2168;2169;2175;2176;2187;2188;2195;2213;2216;2227;2228;2230;2238;2241;2242;2247;2177;2178;2179;2180;2181;2182;2183;2229;2008;2009;2012;2013;2014;2015;2022;2025;2026;2027;2029;2031;2032;2035;2046;2070;2084;2088;2102;2112;2115;2124;2125;2126;2127;2128;2134;2136;2137;2138;2184;2237;2239&siteTypes=River/Stream&majorWatersheds=Blue%20Earth%20River;Cannon%20River;Le%20Sueur%20River;Lower%20Minnesota%20River;Lower%20St.%20Croix%20River;Minnesota%20River%20-%20Mankato;Mississippi%20River%20-%20Lake%20Pepin;Mississippi%20River%20-%20Twin%20Cities;North%20Fork%20Crow%20River;Rum%20River;South%20Fork%20Crow%20River&shortSiteIds=~0nINwl-;EbD7DOBKC6DxB5E1EvCOEqN0MZElFYJwDtJnFrDdJlJ1EPGFFmF6JoFcEDFTDNKOJdDpGBFQFHJuMmDjJ9JeEHCiJsDfJfCkDIMoDaJqNWJ3NnNLN2N9DMNMJ7BqLxFwFeM6BDB4NZCxCZ;&format=csv){.uri}
+
+EIMS query for inorganics:
+
+[https://eims.metc.state.mn.us/Download?startDate=01-01-0001&endDate=12-31-9999&parameterIds=2107;2108;2135;2106;2190;2198;2240;2272;2243;2244;2245;2246;2191;2196;2061;2062;2063;2064;2065;2066;2078;2079;2080;2081;2082;2083;2103;2104;2105;2174;2207;2185;2186;2194;2211;2220;2248;2273;2197;2208;2212&siteTypes=River/Stream&majorWatersheds=Blue%20Earth%20River;Cannon%20River;Le%20Sueur%20River;Lower%20Minnesota%20River;Lower%20St.%20Croix%20River;Minnesota%20River%20-%20Mankato;Mississippi%20River%20-%20Lake%20Pepin;Mississippi%20River%20-%20Twin%20Cities;North%20Fork%20Crow%20River;Rum%20River;South%20Fork%20Crow%20River&shortSiteIds=\\\~0wnNIa-l9MLWV;EbEUElEPDxJuEqC6JdD7DOJ1COB5LTE1EvFrDIFNMAGFBKDECiDiB4FmGBFQFeFHNZDdF6FJEDCNFTKOJ3JnCtEYJ_JfJeDpJqLxFYJ9FwJ8DXJwDmFcNMCxDcJ6M8BqNKJlJsBDJ7DfCkNWNNCZJoMmEHDtMoM9DjM6DaMZE0DuM5NLNTNJM4NONnDNDMNINRN0N2BmDDNHCLNSNPNYJrCjNAHLN9NCNDNcM2GQGSN6NqDL;&format=csv](https://eims.metc.state.mn.us/Download?startDate=01-01-0001&endDate=12-31-9999&parameterIds=2107;2108;2135;2106;2190;2198;2240;2272;2243;2244;2245;2246;2191;2196;2061;2062;2063;2064;2065;2066;2078;2079;2080;2081;2082;2083;2103;2104;2105;2174;2207;2185;2186;2194;2211;2220;2248;2273;2197;2208;2212&siteTypes=River/Stream&majorWatersheds=Blue%20Earth%20River;Cannon%20River;Le%20Sueur%20River;Lower%20Minnesota%20River;Lower%20St.%20Croix%20River;Minnesota%20River%20-%20Mankato;Mississippi%20River%20-%20Lake%20Pepin;Mississippi%20River%20-%20Twin%20Cities;North%20Fork%20Crow%20River;Rum%20River;South%20Fork%20Crow%20River&shortSiteIds=~0wnNIa-l9MLWV;EbEUElEPDxJuEqC6JdD7DOJ1COB5LTE1EvFrDIFNMAGFBKDECiDiB4FmGBFQFeFHNZDdF6FJEDCNFTKOJ3JnCtEYJ_JfJeDpJqLxFYJ9FwJ8DXJwDmFcNMCxDcJ6M8BqNKJlJsBDJ7DfCkNWNNCZJoMmEHDtMoM9DjM6DaMZE0DuM5NLNTNJM4NONnDNDMNINRN0N2BmDDNHCLNSNPNYJrCjNAHLN9NCNDNcM2GQGSN6NqDL;&format=csv){.uri}
+
+## **Option 1: Read in data directly from web using EIMS query:**
+
+Note - format is funky when i do it this way
+
+```{r}
+nutrients_url<-'https://eims.metc.state.mn.us/Download?startDate=01-01-0001&endDate=12-31-9999&parameterIds=2037;2038;2039;2163;2164;2221;2222;2223;2224;2225;2226;2172;2173;2231;2232;2233;2234;2235&siteTypes=River/Stream&majorWatersheds=Blue%20Earth%20River;Cannon%20River;Le%20Sueur%20River;Lower%20Minnesota%20River;Lower%20St.%20Croix%20River;Minnesota%20River%20-%20Mankato;Mississippi%20River%20-%20Lake%20Pepin;Mississippi%20River%20-%20Twin%20Cities;North%20Fork%20Crow%20River;Rum%20River;South%20Fork%20Crow%20River&shortSiteIds=~0INn9wla-;E1FTFrJdB5DxCOBKJuD7C6MmJ7J_EbN0GFJ1EDEHJwF6EqN2JfFYFHDOJqFQNnElDEJlGBEvJeJnJ9JoFmCtEPFeFJFcEUJsEYDpDjBqDmB4DdJrDaBDDXMACjNKBmNZCLKODtNYJ8NWCiDDDfFwFNJ3MoCZCkCNCxDLDIDiM8M6NcNMDNJ6DuNLDcNTMZM5DMLxM4NJN9NONILTM9GSGQE0M2NSNAHLNHNPNCNRNDNN;&format=csv' 
+
+nutrients<-read.csv(nutrients_url)
+head(nutrients)
+#View(nutrients)
+
+#write to file:
+setwd(dir.chem)
+write.csv(nutrients, paste(dir.chem, "/METC_nutrients.csv", sep=""), row.names=FALSE)
+```
+
+## **Option 2: Download data from portal using portal interface and then load into R and combine**
+
+```{r}
+
+#Show all files pre-downloaded from portal:
+list.files(dir.chem)
+
+#List all csv files that contain EIMS data:
+
+files <- list.files(path = dir.chem, pattern = "EIMS.*\\.csv$", full.names = TRUE)
+files
+
+#Check column names of each file to make sure they're the same across files:
+#and omit first 5 rows of metadata
+
+colnames_list <- lapply(files, function(f) {
+  names(read_csv(f, skip = 5, n_max = 0, show_col_types = FALSE))
+})
+
+# Name each element in the list with the file name (optional)
+names(colnames_list) <- basename(files)
+
+# View differences in column names across files:
+colnames_list
+
+#Add column for general parameter type
+#(extract first word from file name)
+get_first_word <- function(file_path) {
+  file_name = basename(file_path)
+  first_word <- str_extract(file_name, "^[^ _]+")
+  return(first_word)
+}
+
+#Read in all EIMS csv files to a list:
+file.list<-lapply(files, function(f){
+  first_word = get_first_word(f)
+  read_csv(f, skip=5) %>% 
+    mutate(ParameterType=first_word)
+}
+)
+
+
+# Combine all EIMS tables into one datafame
+EIMS_combined <- file.list %>% 
+  bind_rows()
+#View(EIMS_combined)
+
+```
+
+## Look at all possible Met Council parameters
+
+```{r}
+
+levels(factor(EIMS_combined$PARAMETER))
+
+#look at number of parameters by major parameter type
+
+EIMS_combined %>% 
+  group_by(ParameterType) %>% 
+  dplyr::select(PARAMETER, ParameterType) %>% 
+  distinct() %>% 
+  count()
+
+#Look at parameters in each major type:
+View(EIMS_combined %>% 
+  filter(ParameterType=="Nutrients") %>% 
+  group_by(PARAMETER) %>% 
+  count())
+
+```
+
+## Map locations of MetC sites
+
+```{r}
+
+names(EIMS_combined)
+
+EIMS_sites_sf<-EIMS_combined %>% 
+  dplyr::select(STATION_ID, NAME, X_COORDINATE_UTM, Y_COORDINATE_UTM) %>% 
+  distinct() %>% 
+#create lat/long coordinates in decimal degrees from UTM
+  mutate(longitude= utm2lonlat(X_COORDINATE_UTM, Y_COORDINATE_UTM, zone=15, hemispher="N")$longitude) %>% 
+  mutate(latitude= utm2lonlat(X_COORDINATE_UTM, Y_COORDINATE_UTM, zone=15, hemispher="N")$latitude) %>% 
+#create spatial object
+  st_as_sf(coords=c("longitude", "latitude"), crs=4326) %>%  #4326 is code for WGS84
+#transform to NAD83
+  st_transform(crs=4269)
+
+#quick check of map:
+plot(EIMS_sites_sf["NAME"])
+
+```
+
+Make a nicer map:
+
+```{r}
+#read in county boundaries for MN using tigris package
+counties <-counties("Minnesota")
+head(counties)
+names(counties)
+
+st_crs(counties) #check coordinate reference system 
+
+
+#Create list of counties in TC Metro 
+Metro.List<-c("Anoka", "Carver", "Dakota", "Hennepin", "Ramsey", "Scott", "Washington")
+
+#Filter county shapefile to TC Metro only 
+TC.Metro.counties<-counties %>% 
+  filter(NAME %in% Metro.List)
+
+
+#Add in NHD streams layer:
+#First dissolve the boundaries between TC counties to create a single contiguous polygon for the area of interest (AOI)
+TC_contig <- st_union(TC.Metro.counties)
+
+NHD_TC<-get_nhdplus(
+  AOI = TC_contig)
+
+#order of agencies to show in plot
+#put MPCA first so it doesn't cover up all the other agencies (where there is overlap)
+
+
+#Plot the map
+
+tmap_mode("plot")
+
+
+#map colors from color brewer
+color.palette<-c('#66c2a5','#fc8d62','#8da0cb','#e78ac3','#a6d854','#ffd92f','#e5c494','#b3b3b3')
+
+EIMS.map<-
+tm_shape(TC.Metro.counties)+
+  tm_borders()+
+tm_shape(NHD_TC)+
+  tm_lines(col="#2c7bb6", lwd=0.5)+
+tm_shape(EIMS_sites_sf)+
+#sites sampled by agencies other than MPCA:
+  #tm_shape(biodata_NAD83 %>% filter(!agency=="MPCA"))+
+  tm_dots()
+EIMS.map
+
+```
+
+# Combine WQP + EIMS Water Chemistry Data
+
+For the entire state of MN
+
+```{r}
+
+#water chem data from Met Council
+names(EIMS_combined)
+View(EIMS_combined)
+
+#water chem data for state of MN from WQP
+names(WQP.chem.sites.specific)
+View(WQP.chem.sites.specific)
+
+#Select key columns from both datasets 
+#Convert coordinates to common units
+#Convert columns to common names
+#Add missing columns as needed 
+#Convert Date to common format 
+
+EIMS.sel<-EIMS_combined %>% 
+  mutate(OrganizationFormalName="MetCouncil") %>% 
+  
+  #create Longitude in decimal degrees  
+   mutate(longitude= utm2lonlat(X_COORDINATE_UTM, Y_COORDINATE_UTM, zone=15, hemispher="N")$longitude) %>% 
+  #create Latitute in decimal degrees:
+  mutate(latitude=utm2lonlat(X_COORDINATE_UTM, Y_COORDINATE_UTM, zone=15, hemispher="N")$latitude) %>% 
+#format Date
+  mutate(Date=as.Date(as.POSIXct(START_DATE_TIME, format = "%m/%d/%Y %H:%M"))) %>% 
+  #add additional blank columns to match WQP
+  mutate(HydrologicCondition="NA", HydrologicEvent="NA", Analytical.Method="NA") %>% 
+  #rename attributes
+  rename(SiteName=DESCRIPTION) %>% 
+ #select desired attributes
+   dplyr::select(OrganizationFormalName, SiteName, latitude, longitude, Date, PARAMETER, RESULT, UNITS, HydrologicCondition, HydrologicEvent, Analytical.Method)
+
+View(EIMS.sel)
+
+
+WQP.sel<-WQP.chem.sites.specific %>% 
+  #rename columns to match 
+  rename(latitude=LatitudeMeasure, longitude=LongitudeMeasure, PARAMETER=parameter_nm, UNITS=parameter_units, SiteName=MonitoringLocationName, RESULT=ResultMeasureValue, Analytical.Method=ResultAnalyticalMethod.MethodName) %>%
+  #format Date
+  mutate(Date=as.Date(ActivityStartDate)) %>% 
+  #select desired attributes
+ dplyr::select(OrganizationFormalName, SiteName, latitude, longitude, Date, PARAMETER, RESULT, UNITS, HydrologicCondition, HydrologicEvent, Analytical.Method)
+
+#View(WQP.sel)
+
+#Combine two datasets:
+
+Water.chem.all<-rbind(WQP.sel, EIMS.sel) 
+
+nrow(Water.chem.all)
+Water.chem.all<-Water.chem.all %>% 
+  filter(!is.na(latitude))
+nrow(Water.chem.all)
+```
+
+Check the map of all water chemistry locations
+
+```{r}
+
+#Write water chem to spatial object:
+Water.chem.all.sf<- st_as_sf(Water.chem.all, coords=c("longitude", "latitude"), crs=4269)  #4269  is code for NAD83
+
+#Quick and dirty check:
+plot(Water.chem.all.sf %>% st_geometry())
+
+#number of distinct sites
+Water.chem.all %>% dplyr::select(latitude, longitude) %>% distinct() %>% count()
+
+#Nicer map 
+#read in USA state boundaries using tigris package
+states<-states()
+names(states)
+
+#MN only 
+MN_sf <- st_as_sf(states %>% filter(STUSPS=="MN")) #convert to sf object
+
+tmap_mode("view")
+
+names(Water.chem.all.sf)
+
+#plot only unique locations
+
+tm_shape(MN_sf) +
+tm_borders()+
+tm_shape(Water.chem.all.sf %>% dplyr::select(geometry) %>% distinct())+
+ tm_dots()
+
+
+```
+
+Write all chemistry data to file
+
+```{r}
+write.csv(Water.chem.all, paste0(dir.output, '/WQP_EIMS_waterchem_combined.csv'))
+```

@@ -1,0 +1,56 @@
+---
+title: "module_OTUs"
+author: "Christy Dolph"
+date: "2025-10-09"
+output: html_document
+---
+
+# Overview and background
+
+This script checks and resolves operational taxonomic units (OTUs) for fish and benthic macroinvertebrate taxa.
+
+See Twardochleb et al 2021: <https://onlinelibrary.wiley.com/doi/10.1111/geb.13257>
+
+They reference the taxize package in R for harmonizing data - this can be used to ID a standard set of taxonomic names and upstream classification (Family, Order etc)
+
+Possible EPA script for OTUs?
+
+<https://www.epa.gov/caddis/using-taxon-environment-relationships-assign-operational-taxonomic-units>
+
+State of Washington has a key for resolution decisions (2018):
+
+<https://apps.ecology.wa.gov/publications/documents/2203222.pdf>
+
+Bouchard paper about resolution (2005): <https://biosurvey.ku.edu/sites/biosurvey/files/2023-01/KBSRept133_TaxResol.pdf>
+
+"...Bouchard’s (Bouchard 2002) work in wadeable streams in the Western Corn Belt Plains ecoregion indicates that even in systems with limited taxon richness, genus-level resolution is more informative in discerning impacts to these stream sytems. Lenat and Resh (2001) argue that many cases require more precise identifications such as genus or species. When conclusions are to be made with a high degree of confidence and when small between-site difference are investigated a level lower than family should be utilized. If the study in interested in deducing both the magnitude and type of perturbation the authors argue that only genus- or species-level identifications should be analyzed. The authors argue for the use of species-level identifications in conservation studies because rare species are likely missed when higher taxonomic levels are used. Finally, the authors state that ideally any multipurpose federal/state survey should be done at the lowest possibly taxonomic level. This would increase comparability between studies over time and it would make subtle changes in systems over long periods of time (decades) much more detectable because more organisms would be catalogued."
+
+MPCA has a list of "taxonomic target" IDs:
+
+<https://www.pca.state.mn.us/sites/default/files/wq-bsm3-12a.pdf>
+
+Possible resources reviewing approaches and needs to harmonization:
+
+Sullivan et al 2023 <https://www.sciencedirect.com/science/article/pii/S1470160X23003266>
+
+Simaika et al 2024
+
+<https://www.sciencedirect.com/science/article/pii/S0048969724004959>
+
+Write a script:
+
+Genus IDs
+
+If family ID, do genus IDs exist?
+
+OR just the the simplest thing and roll everything up to common ID
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Steps:
+
+1.  use taxize package to link all IDs to a systematic naming system and upstream IDs
+2.  Assess how much harmonization is needed - ie, count the number of coarser resolution IDs redundant with more specific IDs
+3.  write a protocol for whether to retain or roll up IDs based on some criteria (state of Washington offers one, there may be others)

@@ -1,0 +1,133 @@
+---
+title: "Converting coordinates to shapefiles"
+author: "Christy Dolph"
+date: "2025-09-10"
+output: html_document
+---
+
+# Convert coordinates to shapefile
+
+This script takes site coordinates (longitude, latitude) and converts them to shapefile.
+
+Example data: Claire Bass chloride monitoring sites
+
+## Set up Workspace
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clean up workspace and load packages (or install if you don't already have them installed)
+
+#Removes everything in work environment
+rm(list=ls())
+
+
+#Packages you need:
+want <- c("here", "tidyverse", "readxl", "sf", "tmap", 
+          "nhdplusTools", "oce", "tigris")
+          
+          need <- want[!(want %in% installed.packages()[,"Package"])]
+if (length(need)) install.packages(need)
+lapply(want, function(i) require(i, character.only=TRUE))
+rm(want, need)
+
+
+#Set up working directories
+
+#Note: Using a workaround for now to set up directories, ultimately we should have all of the data inside the R project folder 
+
+dir <- list()
+root.dir <- getwd() #Set Main Directory one level up
+
+#Data Directory:
+data.dir <- here("..", "Compiled_data_clean/") 
+data.dir
+
+#GIS directory
+gis.dir<-here("..", "GIS_layers")
+gis.dir
+
+#Map images directory
+maps.dir<-here("..", "Maps")
+
+#Water chem directory
+dir.chem <- paste(root.dir, "/Water_chemistry_datasets", sep = "")
+dir.chem
+```
+
+## Load coordinate data:
+
+locations of Claire chloride sampling sites (shared on July 18, 2025)
+
+```{r}
+
+cl.sites<-read_excel(paste0(dir.chem, '/Copy_of_Claire_Bass_Chloride_Sampling_Sites.xlsx'))
+
+head(cl.sites)
+```
+
+## Convert coordinates to spatial locations
+
+```{r}
+
+#Note: this sets the coordinate reference system to NAD83 (code=4269)
+
+#Missing values for coordinates are not allowed, so we need to exclude those sites
+
+cl_spatial<-st_as_sf(cl.sites %>% filter(!is.na(Latitude)), coords=c("Longitude", "Latitude"), crs=4269)
+
+#Quick map check:
+plot(cl_spatial$geometry)
+
+```
+
+## Write sites to shapefile
+
+```{r}
+
+st_write(cl_spatial, paste0(gis.dir, '/Claire_Bass_Chloride_Sampling_sites.shp'))
+
+```
+
+### Make a nicer map:
+
+Also including Twin Cities Metro Area and stream flowlines
+
+```{r}
+
+#load Twin Cities couty boundaries using tigris package
+
+
+counties <-counties("Minnesota")
+head(counties)
+names(counties)
+
+st_crs(counties) #check coordinate reference system 
+
+
+#Create list of counties in TC Metro 
+Metro.List<-c("Anoka", "Carver", "Dakota", "Hennepin", "Ramsey", "Scott", "Washington")
+
+#Filter county shapefile to TC Metro only 
+TC.Metro.counties<-counties %>% 
+  filter(NAME %in% Metro.List)
+
+
+
+#Add in NHD streams layer using nhdplusTools package:
+#First dissolve the boundaries between TC counties to create a single contiguous polygon for the area of interest (AOI)
+TC_contig <- st_union(TC.Metro.counties)
+
+#Then use this search area to get flowlines:
+NHD_TC<-get_nhdplus(
+  AOI = TC_contig)
+
+
+#Plot everything in a map
+tm_shape(TC.Metro.counties)+
+  tm_borders()+
+tm_shape(NHD_TC)+
+  tm_lines(col="steelblue1")+
+tm_shape(cl_spatial)+
+  tm_dots()
+```
