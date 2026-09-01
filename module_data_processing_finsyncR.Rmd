@@ -1,0 +1,247 @@
+---
+title: "module_EPA_USGS_finsync"
+author: "Christy Dolph"
+date: "2026-04-14"
+output: html_document
+---
+
+Overview: use the finsyncR package to access harmonized EPA and USGS macroinvertebrate (and fish) data
+
+See <https://usepa.github.io/finsyncR/> for more info
+
+Full reference: <https://www.biorxiv.org/content/biorxiv/early/2024/02/27/2024.02.22.581615.full.pdf>
+
+# Set Up Workspace
+
+```{r}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clean up workspace and load packages (or install if necessary)
+rm(list=ls())
+
+want <- c("readxl", "writexl", "tidyverse", "zoo", 
+          "tigris", "sf", "tmap", "purrr", "fs", "pak")
+          
+          need <- want[!(want %in% installed.packages()[,"Package"])]
+if (length(need)) install.packages(need)
+lapply(want, function(i) require(i, character.only=TRUE))
+rm(want, need)
+
+#Install finsyncR - this is recommended on their github.io, but install_github appears to be deprecated
+#library(devtools)
+
+#devtools::install_github("USEPA/finsyncR",
+#                         build_vignette = TRUE)
+
+#Possible alternative approach:
+
+# Use pak to install finsyncR from the USEPA GitHub repository
+
+pak::pak("USEPA/finsyncR")
+
+library("finsyncR")
+
+
+#Designate directoriers:
+
+
+#Overall project directory:
+root.dir <- getwd() 
+root.dir
+
+#Output Data Directory for processed data:
+output.dir <- paste0(root.dir, "/Data/biodata_processed") 
+output.dir
+
+#Vignettes:
+vignette.dir<-paste0(root.dir, "/vignettes")
+vignette.dir
+
+
+```
+
+# Vignettes
+
+Note: calling *vignettes()* isn't working, but vignettes were downloaded directly from github (<https://github.com/USEPA/finsyncR>) , and saved in the 'vignettes' folder
+
+```{r}
+
+#Not working:
+vignettes("BackCalculation", "finsyncR")
+
+help("getInvertData")
+```
+
+# Get Invert Data
+
+Default is to pull USGS and EPA data.
+
+taxonLevel = “Mixed” - pulls lowest level available ID for all specimens (and results in no specimens being dropped; so retains coarser level IDs if that's what's available for a given specimen). Alternatively, taxonLevel="Genus" will keep only genus level IDs.
+
+taxonFix="lump" creates complexes of genera, by combining all possible genera for a given organism. Prioritizes retaining observations of organisms by giving a unified name to a complex of genera that have been linked by changes in taxonomy through time. No temporal increase or decrease in the number of genera, given that individual genera (genus 1) never appear outside of the lump genera name. 82 macroinvertebrate taxa are linked by changes in taxonomy through time. Lumping reduces 82 genera to 11 lumped genera. Most lumped genera are composed of two individual genera. One lumped group within Ephemeroptera includes 54 genera. Because of the complexity of Ephemeroptera taxonomy, careful consideration should be given to inferences that can be made when evaluating trends in Ephemeroptera diversity and abundance.
+
+\-[Can i find their base taxonomy tables??]
+
+```{r}
+
+Inverts<-getInvertData(
+  dataType="density", 
+  taxonLevel="Mixed",
+  taxonFix="lump", 
+  rarefy=FALSE,
+  lifestage = FALSE,
+  sharedTaxa = F,
+  seed = 0,
+  boatableStreams = T)
+
+View(Inverts)
+
+
+```
+
+# Roll up taxa
+
+"User may wish to roll up the 11 lumped genera to the lowest level of consistent taxonomic designation for each lumped genera group - lumpRollUp() - takes an input dataset produced by getInvertData() and performs this taxonomic transformation"
+
+Note that this mostly rolls up mayflies to Ephemeroptera (order). Other roll ups include: Leptohyphidae Unioninae Planorbidae Leptophlebiidae Piscicolidae Chironominae Libelludlidae
+
+**Note: 4.21.26 - I am keeping finer resolution data for now (not rolling up).** But, I am making a taxonomy table to match IDs at coarser scales with TC and MPCA datasets (see 'module_OTUs.Rmd')
+
+```{r}
+Inverts.lumped<-lumpRollUp(Inverts)
+
+#View(Inverts.lumped)
+
+#Convert to long:
+names(Inverts.lumped)
+
+Inverts_lumped_long<-Inverts.lumped %>% 
+  pivot_longer(
+    cols = 
+Abedus.Belostoma:Zavreliella, 
+    names_to = "Taxon", 
+    values_to = "Count"
+  )
+
+#Write lumped IDs to file
+
+write.csv(Inverts_lumped_long %>% dplyr::select(Taxon) %>% distinct(), paste0(output.dir, "./finsync_Invert_IDs_all_lumped.csv"), row.names=FALSE)
+```
+
+# Back calculate abundance and raw counts from density
+
+From Mahon et al 2024:
+
+<https://www.biorxiv.org/content/biorxiv/early/2024/02/27/2024.02.22.581615.full.pdf>
+
+"No density or standardized abundance measurements are provided in the original datasets which can be a barrier to data use. The package automates the calculation of macroinvertebrate densities and fish standardized abundances. For macroinvertebrates, density calculations are simply macroinvertebrate abundance divided by the area sampled (Fig. 6). Macroinvertebrate abundance is the number of individuals counted in a gridded tray in the lab multiplied by the inverse of the proportion of the sample collected in the field that was identified at the lab bench (PropID). The calculation of PropID differs by agency because of differences in splitting samples in the field. For USGS samples, a proportion of the homogenized field sample is separated before specimen identification and enumeration in the lab. This proportion is the “field split ratio” (Fig. 6). EPA field samples are not split. For both EPA and USGS the processing of samples in the lab is similar. In the lab, organisms in a sample are placed uniformly among the grids in a subsampling tray. Grids are randomly selected and organisms within a given grid are identified until a target organism count is reached. The proportion of grids used to identify macroinvertebrates at the lab bench is the “lab subsampling ratio”. For USGS samples, PropID is calculated by multiplying the “field split ratio” and the “lab subsampling ratio” (Fig. 6). For EPA samples, PropID is equal to the “lab subsampling ratio” (Fig. 6). The package does not provide abundance and raw counts of macroinvertebrates, but they can be back calculated from density. We provide code to do these back calculation in a vignette that can be accessed with the following code vignettes("BackCalculation", "finsyncR"). This vignette also includes code to rarefy raw counts of samples."
+
+From "BackCalculation" vignette:
+
+Since density is sample abundance / Area sampled, we can calculate sample abundance by multiplying density values by the area sampled.
+
+```{r}
+
+Invert_Abundance <- Inverts %>%
+  mutate(across(.cols = !(Agency:Gen_ID_Prop),
+                ~ . * AreaSampTot_m2))
+
+View(Invert_Abundance)
+```
+
+From BackCalculation vignette: "Then, since sample abundance is Raw Count \* (1 / Proportion of the sample identified [`PropID`]), we can calculate raw count values by multiplying sample abundance values by `PropID` (proportion of the sample identified). Here we include the `round()` function, because of rounding in the calculation of density, many raw count values are not integers. So, including `round()` provides the integer value of the raw counts."
+
+```{r}
+
+i2_RawCount <- Invert_Abundance %>%
+  mutate(across(.cols = !(Agency:Gen_ID_Prop),
+                ~ round(. * PropID,0)))
+
+View(i2_RawCount)
+
+```
+
+# Convert biodata to spatial object
+
+```{r}
+
+inverts_sf<-st_as_sf(i2_RawCount, coords=c("Longitude_dd", "Latitude_dd"), crs=4269)
+
+```
+
+Clip out MN data
+
+```{r}
+
+states<-states()
+states_sf <- st_as_sf(states) #convert to sf object
+st_bbox(states_sf) #bounding box
+states_sf
+
+st_crs(states_sf) #check reference system
+
+#For area of interest, select states that overlap with sample locations
+
+MN<-states_sf %>% 
+  filter(STUSPS =="MN")
+
+
+Inverts_MN<-st_intersection(inverts_sf, MN) %>%  mutate(lon = st_coordinates(.)[,1],
+         lat = st_coordinates(.)[,2])
+
+
+```
+
+Quick map check:
+
+```{r}
+
+tm_shape(MN)+
+  tm_borders()+
+  tm_shape(Inverts_MN)+
+  tm_dots()
+```
+
+# Count \# of sites and write to table
+
+```{r}
+#Number of sample sites
+
+Inverts_MN %>% dplyr::select(lon, lat) %>% distinct() %>% nrow() #308 sites 
+
+View(Inverts_MN)
+
+#Convert to long form
+names(Inverts_MN)
+
+Inverts_long<-Inverts_MN %>% 
+  pivot_longer(
+    cols = 
+Acentrella.Acerpenna.Amercaenis.Americabaetis.Anafroptilum.Apobaetis.Attenella.Baetis.Baetisca.Barbaetis.Brachycercus.Caenis.Callibaetis.Caudatella.Centroptilum.Cinygma.Cinygmula.Cloeon.Dannella.Dentatella.Diphetor.Drunella.Ecdyonurus.Epeorus.Ephemera.Ephemerella.Eurylophella.Fallceon.Heptagenia.Heterocloeon.Hexagenia.Ironodes.Iswaeon.Labiobaetis.Leucrocuta.Litobrancha.Maccaffertium.Matriella.Nixe.Paracloeodes.Penelomax.Plauditus.Procloeon.Pseudocloeon.Raptoheptagenia.Rhithrogena.Serratella.Sparbarus.Stenacron.Stenonema.Susperatus.Teloganopsis.Timpanoga.Tsalia:Acella, 
+    names_to = "Taxon", 
+    values_to = "Count"
+  )
+
+View(Inverts_long)
+
+#Write to table
+write.csv(Inverts_long %>% st_drop_geometry(), paste0(output.dir, "./USGS_EPA_Inverts_MN_long_finsync.csv"), row.names=FALSE)
+
+```
+
+# Look at complete taxa list
+
+```{r}
+
+View(Inverts_long %>% st_drop_geometry() %>% dplyr::select(Taxon) %>% distinct())
+
+#One idea is to use this as OTUS?
+
+levels(factor(Inverts_long$Taxon))
+
+#Write taxa list to file
+
+write.csv(Inverts_long %>% st_drop_geometry() %>% dplyr::select(Taxon) %>% distinct(), paste0(output.dir, "./finsync_invert_taxa_list_MN.csv"))
+
+```
