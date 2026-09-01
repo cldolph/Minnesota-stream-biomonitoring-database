@@ -1,0 +1,666 @@
+---
+title: "module_environmental_variables"
+author: "Christy Dolph"
+date: "2026-06-04"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Overview
+
+# Set Up Workspace
+
+```{r}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clean up workspace and load packages (or install if necessary)
+rm(list=ls())
+
+want <- c("readxl", "writexl", "tidyverse", "zoo", 
+          "tigris", "sf", "tmap", "purrr", "fs", "pak", "fuzzyjoin", "data.table", "stringr", "taxize", "nhdplusTools")
+          
+          need <- want[!(want %in% installed.packages()[,"Package"])]
+if (length(need)) install.packages(need)
+lapply(want, function(i) require(i, character.only=TRUE))
+rm(want, need)
+
+#Install StreamCatTools (if not already installed):
+# First install remotes if needed
+if (!requireNamespace("remotes", quietly = TRUE)) {
+  install.packages("remotes")
+}
+# Install StreamCatTools
+if (!requireNamespace("StreamCatTools", quietly = TRUE)) {
+  remotes::install_github("USEPA/StreamCatTools")
+}
+# Load the package
+library(StreamCatTools)
+
+
+#Designate directoriers:
+
+
+#Overall project directory:
+root.dir <- getwd() 
+root.dir
+
+#Output Data Directory for processed data:
+env.dir <- paste0(root.dir, "/Data/environmental_data") 
+env.dir
+
+
+#Output directory for tables/figures
+fig.dir<-paste0(root.dir, "/Data/Figures_Tables")
+
+#Spatial data:
+spatial.dir<-paste0(root.dir, "/Data/GIS")
+
+# Create additional folder destinations, if they don't already exist:
+dir.create(file.path(root.dir, "/Data/GIS"))
+dir.create(file.path(root.dir, "/Data/Figures_Tables"))
+```
+
+# 1 Load Macroinvertebrate data
+
+Data summarized at family or genus level.
+
+```{r}
+
+#list.files(env.dir)
+
+Fam.abund<-read_xlsx(paste0(env.dir, "/Family_relative_abundance.xlsx"))
+
+```
+
+# 2 Link to EPA StreamCat Attributes
+
+## 2.1 Convert sample locations to spatial object for mapping
+
+```{r}
+
+#Convert sample locations to spatial object:}
+
+loc_sf<-st_as_sf(Fam.abund %>% dplyr::select(Original_ID, Longitude, Latitude) %>% distinct(), coords=c("Longitude","Latitude"), crs=4269, remove=FALSE)
+
+View(loc_sf)
+
+#Quick plot check of all compiled data:#(choose interactive or static viewing)
+
+tmap_mode("view")
+
+Sites.map<-
+  tm_shape(loc_sf)+
+  tm_dots()
+
+Sites.map
+
+
+```
+
+## 2.2 Get Area of Interest for extracting spatial attributes
+
+```{r}
+
+#Draw a bounding box around sample locations, for use in extracting hydrologic data
+
+loc_bbox<-st_as_sfc(st_bbox(loc_sf))
+
+plot(loc_bbox)
+
+#Pull in HUC4 boundaries using nhdplusTools 
+#These will be HUC4 boundaries that overlap with the study area bounding box 
+
+HUC4<-get_huc(AOI = loc_bbox, type = "huc04") 
+
+
+#plot locations of sample sites, and HUC4 boundaries  
+
+tmap_mode("view")  
+
+tm_shape(loc_sf)+   
+  tm_dots(col="purple",alpha=0.4)+
+  tm_shape(HUC4)+   
+  tm_borders(col="blue")+   
+  tm_labels("name")
+  #tm_text("name", size = 1.0, col = "black", xmod = 0.2, ymod = -0.2, remove.overlap = FALSE)
+```
+
+Dissolve HUC4 boundaries to create a hydrologic AOI:
+
+```{r}
+
+HUC4_AOI <- st_union(HUC4)  
+
+plot(HUC4_AOI)
+```
+
+## 2.3 National Hydrography Dataset (NHD)
+
+Use nhdplusTools package to link sample locations to NHD COMID (unique identifier for each stream reach of the NHD).
+
+The COMID can then be used to link the location to NHD attributes (stream type, stream order, etc) as well as EPA StreamCat attributes.
+
+To do this, we will join sample locations to NHD catchments. This avoids issues with sample location accuracy relative to flowlines (if you tried to join sample points to NHD flowlines rather than catchments).
+
+\*\*Note that 'featureid' of an NHD Catchment is equal to COMID of an NHD flowline; see p. 47 of the NHDPlusV2 User Guide:
+
+[https://www.epa.gov/system/files/documents/2023-04/NHDPlusV2_User_Guide.pdf](https://www.epa.gov/system/files/documents/2023-04/NHDPlusV2_User_Guide.pdf,)
+
+### 2.3.a Download NHD catchment boundaries for area of interest
+
+Note, this can take considerable time for large spatial area, eg 13 min for state of IL
+
+Note that Feature ID= COMID for stream locations, see <https://www.epa.gov/national-aquatic-resource-surveys/streamcat-dataset-readme>
+
+"StreamCat data is summarized for catchments, and in the catchment shapefiles, COMID is labeled as ‘FEATUREID’. Additionally, there is not a 1:1 relationship between stream segments and catchments - some stream segments have no corresponding catchment, and some sink catchments have no corresponding stream segments within them" - So this approach may not work for water bodies that aren't connected to stream network
+
+```{r}
+
+#Track how long it takes
+Start.time<-Sys.time()  
+Start.time
+
+NHD_catchment<-get_nhdplus(
+  AOI = HUC4_AOI,
+  comid = NULL,   
+  nwis = NULL,   
+  realization = "catchment",   
+  streamorder = NULL,   
+  t_srs = NULL)  
+
+End.time<-Sys.time()  
+
+total.time<-End.time-Start.time
+total.time 
+
+names(NHD_catchment)  
+
+#View(NHD_catchment)  
+
+#Create COMID column 
+
+NHD_catchment$comid<-NHD_catchment$featureid  
+
+#Quick map check: 
+
+tm_shape(NHD_catchment)+   
+  tm_borders()  
+
+#write to file if you want to save the stream network shapefile: 
+
+st_write(NHD_catchment, paste0(spatial.dir, "/nhd_catchment.shp"), append=FALSE)
+
+```
+
+### 2.3.b Identify NHD COMIDs associated with sample locations
+
+see NHDv2Plus User Guide: <https://nhdplus.com/NHDPlus/NHDPlusV2_documentation.php>
+
+```{r}
+
+#first transform sample points and catchments to same projection:  
+
+#continental US (Conus Albers NAD83)    
+
+loc_proj <- st_transform(loc_sf, 5070) 
+
+NHD_catch_proj<-st_transform(NHD_catchment, 5070)
+
+#Join catchment attributes to sample locations:
+
+loc_NHD <- st_join(loc_proj, NHD_catch_proj %>% dplyr::select(comid, areasqkm), join = st_intersects)    
+
+View(loc_NHD)
+
+#write to file (without geometry)
+
+write_xlsx(loc_NHD %>% st_drop_geometry(), paste0(env.dir, "loc_NHD.xlsx"))
+```
+
+## 2.4 Get StreamCat attributes using StreamCatTools
+
+The `StreamCatTools` package was designed to simplify the use of [StreamCat](https://www.epa.gov/national-aquatic-resource-surveys/streamcat-dataset) data in R, leveraging the new [API for StreamCat](https://api.epa.gov/StreamCat/streams/metrics).
+
+There are different ways to request data: by area of interest, by state, or by a list of COMIDs.
+
+Note 1: StreamCat attributes apply to two different scales: 1) catchment scale (called 'Cat') and 2) watershed scales (called 'Ws'). Each attribute will have 'Cat' or 'Ws' in the column name depending on which scale it applies to.
+
+StreamCat Variable list can be seen here (however, note that not all the variables in the streamcat list are in this explainer variable list): <https://www.epa.gov/national-aquatic-resource-surveys/streamcat-metrics-and-definitions>
+
+Some additional metadata on new Streamcat attributes: <https://pasteur.epa.gov/uploads/10.23719/1532282/documents/StreamCatNNI_readme.txt>
+
+```{r}
+
+#Get a list of all Streamcat attributes available:
+
+All.Streamcat<-sc_get_params(param="metric_names") 
+All.Streamcat  
+
+#View(as.data.frame(All.Streamcat))  
+
+#Get all variable descriptions!! And write to table 
+
+Definitions<-sc_get_params(param='variable_info') 
+
+#View(Definitions)  
+
+write.csv(Definitions, paste0(env.dir, "./StreamCat_Variable_Definitions.csv", row.names=FALSE))  
+
+All.Streamcat<-as.data.frame(All.Streamcat)  
+
+#Option to exclude variables you don't want or include only those you do want:
+
+selected.var<-c(
+'pctcrop',
+'pctgrs',
+'pcthay',
+'pctconif',
+'pctdecid',
+'pcthbwet',
+'pctimp',
+'pctmxfst',
+'pctow',
+'pctshrb',
+'pcturbhi',
+'pcturbmd',
+'pcturbop',
+'pctwdwet')
+
+Streamcat.select<- All.Streamcat %>% 
+  filter(grepl(paste(selected.var, collapse = "|"), All.Streamcat))
+
+  #include select variables
+
+#or exclude select variables
+#%>%    filter(!grepl('burn|sev|fire|procmask|vegresp|frstloss', All.Streamcat))%>%    filter(!grepl('2001|2004|2006|2008|2011|2013|2016', All.Streamcat)) %>%    filter(!grepl( "_19|_20", All.Streamcat))   
+
+View(Streamcat.select)  
+
+#Create list of select attributes in appropriate format for sc_get_data() 
+
+metric.list=paste0(Streamcat.select$All.Streamcat, collapse=",") 
+metric.list 
+  
+
+##Pull StreamCat Data using sc_get_data: 
+#For large datasets, a very large data request to sc_get_data appears to crash it out;  
+#So split data into equal chunks and apply function, then combine (split, apply, combine) 
+#filter to set of unique comids associated with sample data  
+
+# Define chunk size, adjust if needed: 
+
+#Read in loc_NHD if needed (sampling sites w/COMID):
+
+loc_NHD<-read_excel(paste0(env.dir, "/loc_NHD.xlsx"))
+
+length(loc_NHD$comid)
+
+chunk_size <- round(length(unique(loc_NHD$comid))/25) 
+chunk_size  
+
+# Split COMIDs into chunks 
+
+comid_chunks <- split(unique(loc_NHD$comid),                        ceiling(seq_along(unique(loc_NHD$comid)) / chunk_size))
+
+
+
+# Iterate over chunks, call sc_get_data, and combine results #(takes a few minutes)  
+
+Start.time<-Sys.time()
+Start.time
+
+sc_data_list <- lapply(comid_chunks, function(chunk) {   
+  comid.list <- paste0(chunk, collapse = ",")   
+  sc_get_data(metric = metric.list, aoi = "cat,ws,catrp100,wsrp100", comid = comid.list, showAreaSqKm=TRUE) })   
+
+End.time<-Sys.time()
+
+End.time-Start.time
+
+# Combine all results into one dataframe 
+
+sc_data <- do.call(rbind, sc_data_list)  
+
+
+# Preview 
+head(sc_data) 
+names(sc_data) 
+View(sc_data) 
+
+nrow(loc_NHD) 
+nrow(sc_data) #Note that some values were dropped - these may be sink catchments (not associated with NHD flowline)  
+
+#Average catchment area for study region: 
+
+sc_data %>% 
+  dplyr::select(catareasqkm, wsareasqkm) %>% 
+  summarise(mean.catchment.area=mean(catareasqkm), median.catchment.area=median(catareasqkm), mean.ws.area=mean(wsareasqkm), median.ws.area=median(wsareasqkm))  
+
+#Note - may want to work with sc_data before merging to parameter data (be more selective) as otherwise the dataframe is very large  
+
+```
+
+## 2.5 Merge StreamCat attributes by COMID to sampling location
+
+Note: if you merge all attributes to all water quality data, it creates a very large dataset that is slow to work with. So if you need something that is quicker to work with, you may want to subset attributes or water quality data you want first before merging them.
+
+Something else important to know! StreamCat summarizes attributes at both the watershed ("ws") and catchment ("cat") scale. watershed is all the land area draining into a stream reach, catchment is just the local land and does not include all the upstream areas.
+
+```{r}
+
+#Merge streamcat attributes to unique sample locations:
+
+
+sites.streamcat<-merge(loc_NHD %>% st_drop_geometry(),    
+                      
+                      sc_data,       
+                      by=c("comid"))  
+
+nrow(sites.streamcat) 
+
+names(sites.streamcat)  
+
+#View(sites.streamcat)
+
+
+#Write the streamcat attributes by site to file: 
+
+write.csv(sites.streamcat, paste0(env.dir, "./StreamCat_data_for_invert_sites.csv"))
+```
+
+# 3 Explore Environmental Data
+
+## 3.1 Examine change in riparian and watershed scale land use
+
+**Note: is there a better dataset to use for this?**
+
+```{r}
+
+#Load StreamCat data 
+
+sites.streamcat<-fread(paste0(env.dir, "/StreamCat_data_for_invert_sites.csv"))
+
+head(sites.streamcat)
+nrow(sites.streamcat)
+
+tot.num.sites<-nrow(sites.streamcat)
+
+View(sites.streamcat)
+
+#For a given variable, extract year and add as column?
+#a pivot_longer, with Year as a column
+
+names(sites.streamcat)
+
+cover.long<-sites.streamcat %>% dplyr::select(matches("decid|mxfst|conif|wet|Original_ID|Longitude|Latitude|catarea|wsarea|comid")) %>% 
+  pivot_longer(cols = contains(c("decid", "mxfst", "conif", "wet")),
+    names_to = "Landcover",
+    values_to = "Pct"
+  ) %>% 
+  #extract  year
+   mutate(Year = as.integer(str_extract(Landcover, "\\d{4}"))) %>% 
+  #remove year from landcover class
+  mutate(Landcover = str_remove(Landcover, "\\d{4}")) 
+
+summary(cover.long$Year)
+
+#Calculate change in land cover between years, 2001-2019
+change<-cover.long %>% 
+ group_by(Original_ID,Landcover) %>%
+#Arrange by year to ensure correct math
+  arrange(Year, .by_group = TRUE) %>%
+#Calculate the difference from the previous year
+  mutate(Pct_diff = Pct - lag(Pct)) %>% 
+  ungroup()
+
+View(change)
+names(change)
+
+
+#Mean difference between measured years acros sites
+
+change %>% 
+  filter(!is.na(Pct_diff)&grepl("rp", Landcover)) %>% 
+  group_by(Landcover) %>% 
+  summarise(mean=mean(Pct_diff), median=median(Pct_diff), min=min(Pct_diff), max=max(Pct_diff), na.rm=TRUE)
+
+#Very small changes in mean riparian cover, when viewed across all sites
+
+#There have been changes on a site by site basis, but the changes somewhat balance out across all sites 
+
+#Sites with a non-zero change?
+change %>% filter(abs(Pct_diff)>5) %>% dplyr::select(Original_ID) %>% distinct()
+
+
+#Sum all changes by site
+
+Tot.Diff<-change %>% filter(!is.na(Pct_diff)) %>% group_by(Original_ID, comid, Landcover) %>% 
+  summarise(total_pct_diff=sum(Pct_diff)) %>% ungroup()
+View(Tot.Diff)
+
+#Mean total change across sites 
+View(Tot.Diff %>% 
+  filter(!is.na(total_pct_diff)&grepl("rp", Landcover)) %>% 
+  group_by(Landcover) %>% 
+  summarise(mean=round(mean(total_pct_diff),2), median=median(total_pct_diff), min=min(total_pct_diff), max=max(total_pct_diff)) %>% 
+  #watershed scale only
+  filter(grepl("ws", Landcover)))
+
+#A small mean decrease in riparian conifer and mixed forest cover across sites, a small increase in deciduous forest cover
+#But note that there are some sites that have quite large differences
+
+#Sites with a non-zero change?
+View(Tot.Diff %>% 
+  dplyr::select(matches("rp|total_pct_diff|Landcover|Original_ID")) %>% 
+  filter(abs(total_pct_diff)>1) %>% 
+  dplyr::select(Original_ID) %>%
+    distinct())
+
+#305 sites have at least 5% total change in one riparian forest land use category over the total time period
+#1482 sites have at least 1% total change in one riparian forest land use category over the total time period; (31% of sites)
+
+305/tot.num.sites
+1482/tot.num.sites
+
+
+levels(factor(Tot.Diff$Landcover))
+
+#Plot Histogram of Total Change?
+#bindwith of 1 would be equal to 1 percent change
+
+ggplot(Tot.Diff %>% filter(grepl("rp", Landcover)) %>% filter(grepl("cat", Landcover)))+
+  geom_histogram(aes(total_pct_diff), binwidth=1, colour = "black", fill ="steelblue")+
+  facet_wrap(~Landcover)+
+  geom_hline(yintercept = 0, color = "white", linewidth = 0.5)+
+  theme(panel.grid=element_blank())
+
+
+#Majority of sites show =<1% change over the total period, for all kinds of forest
+
+```
+
+## 3.2 Map land use change
+
+Land use change is from NLCD, 2001-2019. 'total_pct_diff' reflects net land use change.
+
+For MN catchments where we have biomonitoring data.
+
+```{r}
+
+#Link land cover change to NHD catchments by comid
+
+names(NHD_catchment)
+
+#Long version
+catchment_landcover<-NHD_catchment %>% left_join(
+  Tot.Diff %>%
+    dplyr::select(comid, Landcover, total_pct_diff) 
+  #%>% 
+   # distinct() %>%  
+    #pivot_wider(names_from="Landcover", values_from="total_pct_diff"),
+,
+by = "comid")
+
+
+#Wide version
+catchment_landcover_wide<-NHD_catchment %>% left_join(
+  Tot.Diff %>%
+    dplyr::select(comid, Landcover, total_pct_diff),
+  
+  by='comid') %>% 
+filter(!is.na(Landcover)) %>% 
+distinct() %>%  
+pivot_wider(names_from="Landcover", values_from="total_pct_diff")
+
+View(catchment_landcover_wide)
+
+ 
+#Plot map of multiple variables
+
+#Option to select only some land use categories
+
+filtered_landcover <- catchment_landcover %>% 
+  dplyr::filter(Landcover %in% c('pctconifws', 'pctconifcatrp100')) %>%
+  dplyr::mutate(total_pct_diff = as.numeric(total_pct_diff)) %>% 
+  dplyr::filter(!is.na(total_pct_diff)) %>% 
+  sf::st_make_valid()
+
+
+
+tmap_mode("plot")
+
+#Note that in "View" mode, polygon fill doesn't show 
+#tmap_mode("view")
+
+#Also note that if elements of outdated (v3) code are included, this can nullify some otherwise functional aspects of the code
+
+#set color palette
+palette <- c("#8c510a",
+"#d8b365",
+"#f6e8c3",
+#"#f5f5f5",
+"#c7eae5",
+"#5ab4ac",
+"#01665e")
+
+palette2<-c(
+"#67001f",
+"#b2182b",
+"#d6604d",
+"#f4a582",
+"#d1e5f0",
+"#92c5de",
+"#4393c3",
+"#2166ac",
+"#053061")
+
+
+#"#fddbc7",
+#"#f7f7f7",
+
+
+#This works for one variable!
+tm_shape(catchment_landcover_wide) +
+    tm_polygons(
+        fill = "pctconifws",
+        #col = NA,
+        lwd=0,
+        col="white",
+        fill.scale = tm_scale_intervals(
+            values = palette
+        )
+    )
+
+
+#Multiple variables:
+
+names(catchment_landcover_wide)
+
+#########################################
+#Method 1 (wide data)
+
+tmap_mode("plot")
+#Note: this facetting method doesn't work in "view" mode
+
+#Make nicer land use labels
+catchment_landcover_wide<-catchment_landcover_wide %>% mutate(`% conifer riparian`=pctconifwsrp100, `% deciduous forest riparian` =pctdecidwsrp100, `% mixed forest riparian`=pctmxfstwsrp100, `% woody wetland riparian`=pctwdwetwsrp100, `% herb wetland riparian`=pcthbwetwsrp100)
+
+names(catchment_landcover_wide)
+
+LU.map<-tm_shape(catchment_landcover_wide) +
+    tm_polygons(
+        fill = c(
+          #"pctconifws", 
+          "% conifer riparian", 
+          #"pctdecidws", 
+          "% deciduous forest riparian", 
+          #"pctmxfstws", 
+          "% mixed forest riparian", 
+          #"pctwdwetws", 
+          "% woody wetland riparian",
+          "% herb wetland riparian"),
+#make polygon borderes transparent!
+        col_alpha = 0,
+        fill.free=FALSE,
+        fill.scale = tm_scale_intervals(breaks=c(-30,-15,-5, -1,0,1,5,15, 30),
+            values = palette2),
+fill.legend = tm_legend(title = "Change in % land use")
+    )+
+tm_layout(
+    bg.color = "white")+
+#option for vertical stacking:
+#tm_facets_vstack()
+tm_facets(ncol=3)
+
+LU.map
+
+#################################
+#Method 2 (long data):
+tm_shape(catchment_landcover %>% filter(!is.na(Landcover))) +
+    tm_polygons(
+        fill = "total_pct_diff",
+        #col = NA,
+        lwd=0,
+        col="white",
+        fill.scale = tm_scale_intervals(
+            values = palette
+        )
+    )+
+  tm_facets_stack()
+
+```
+
+For sites with temporal change in forest cover, what is coverage of biomonitoring data?
+
+```{r}
+
+#Subset to sites with 5% or more change in riparian land use
+Sites.with.change<-(Tot.Diff %>% 
+  dplyr::select(matches("rp|total_pct_diff|Landcover|Original_ID")) %>% 
+  filter(abs(total_pct_diff)>=5) %>% 
+  dplyr::select(Original_ID) %>%
+    distinct())
+
+Sites.with.change
+
+#Subset macroinvert data to these sites
+Sites.subset<-Fam.abund %>% 
+  filter(Original_ID %in% Sites.with.change$Original_ID)
+
+#How many visits and year range for each site?
+
+View(Sites.subset %>% 
+  dplyr::select(Original_ID, Date) %>% distinct() %>% 
+ group_by(Original_ID) %>%
+  summarise(
+    total_dates = n(),
+    start_date  = year(min(Date, na.rm = TRUE)),
+    end_date    = year(max(Date, na.rm = TRUE))
+  ) %>% 
+   filter(total_dates>1))
+  
+#120 with changing riparian land use (>5%) sites visited more than once
+#1996-2024
+```

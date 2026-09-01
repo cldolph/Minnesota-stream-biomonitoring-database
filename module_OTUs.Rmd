@@ -76,8 +76,8 @@ raw.dir<-paste0(root.dir, "/Data/biodata_raw")
 raw.dir
 
 #Output Data Directory for processed data:
-output.dir <- paste0(root.dir, "/Data/biodata_processing") 
-output.dir
+input.dir <- paste0(root.dir, "/Data/biodata_processing") 
+input.dir
 
 #Output directory for finalized taxonomic datasets
 taxa.dir<-paste0(root.dir, "/Data/processed_taxonomic_datasets")
@@ -98,17 +98,17 @@ Note that all data are raw counts.
 
 ```{r}
 
-list.files(output.dir)
+list.files(input.dir)
 
-mpca<-as.data.frame(fread(paste0(output.dir, "./mpca_inverts_compiled.csv")))
+mpca<-as.data.frame(fread(paste0(input.dir, "./mpca_inverts_compiled.csv")))
 names(mpca)
 #View(mpca)
 
-nat<-as.data.frame(fread(paste0(output.dir, "./USGS_EPA_Inverts_MN_long_finsync.csv")))
+nat<-as.data.frame(fread(paste0(input.dir, "./USGS_EPA_Inverts_MN_long_finsync.csv")))
 names(nat)
 #View(nat)
 
-TC<-read.csv(paste0(output.dir, "./TC_final_combined_data.csv"))
+TC<-read.csv(paste0(input.dir, "./TC_final_combined_data.csv"))
 names(TC)
 
 ```
@@ -554,7 +554,7 @@ Note: this is a faster way to match taxa to genus, family and order IDs, as the 
 
 #read in taxonomy table  
 
-conus.tax<-as.data.frame(fread(paste0(output.dir, "./Twardochleb_Ancillary_Taxonomy.csv")))  
+conus.tax<-as.data.frame(fread(paste0(input.dir, "./Twardochleb_Ancillary_Taxonomy.csv")))  
 head(conus.tax)   
 
 #need to think about matching for different resolution of taxonomic ID? could match in series?   
@@ -694,7 +694,7 @@ nrow(tax.table)
 
 tax.table %>% filter(!is.na(genus)) %>% nrow()
 
-write.csv(tax.table.add, paste0(output.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv"), row.names=FALSE)
+write.csv(tax.table.add, paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv"), row.names=FALSE)
 
 ```
 
@@ -724,7 +724,7 @@ still.missing.list
 
 #And, some taxa were not in ITIS at all: 
 #load partial taxonomy table if needed
-tax.table.add<-as.data.frame(fread(paste0(output.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv")))
+tax.table.add<-as.data.frame(fread(paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv")))
 
 #ID taxa with no taxonomic info so far: 
 no.match2<-all.bugs.clean3 %>% 
@@ -739,7 +739,7 @@ no.match2
 ##Add in taxonomic info for both of these lists of taxa: 
 #These were researched independently by me in May/June 2026
 
-add.info.itis <-read_excel(paste0(output.dir, "/taxonomy_for_taxa_with_incomplete_itis_record.xlsx"))
+add.info.itis <-read_excel(paste0(input.dir, "/taxonomy_for_taxa_with_incomplete_itis_record.xlsx"))
 
 names(add.info.itis)
 
@@ -761,7 +761,7 @@ View(tax.table.add)
 
 #write to file to save work
 
-write.csv(tax.table.add, paste0(output.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv"), row.names=FALSE)
+write.csv(tax.table.add, paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv"), row.names=FALSE)
 
 
 ```
@@ -771,7 +771,7 @@ write.csv(tax.table.add, paste0(output.dir, "./full_taxonomic_hierarchy_most_tax
 ```{r}
 
 #Load taxonomy for compiled taxa to date:
-tax.table<-read.csv(paste0(output.dir, "/full_taxonomic_hierarchy_most_taxa_updated.csv"))
+tax.table<-read.csv(paste0(input.dir, "/full_taxonomic_hierarchy_most_taxa_updated.csv"))
 names(tax.table)
 
 #Add any other taxa: 
@@ -804,7 +804,7 @@ View(tax.table2)
 
 ###
 ##Write updated table to file
-write.csv(tax.table2, paste0(output.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv"), row.names=FALSE)
+write.csv(tax.table2, paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv"), row.names=FALSE)
 
 ```
 
@@ -833,7 +833,7 @@ all.bugs.clean3<-all.bugs.clean2 %>%
 #Name changes from original taxon ID, based on changes in classification:
 #(see refs in "taxonomy_for_taxa_with_incomplete_itis_record.xlsx")
 #Load additional information about these taxa:
-add.info.itis <-read_excel(paste0(output.dir, "/taxonomy_for_taxa_with_incomplete_itis_record.xlsx"))
+add.info.itis <-read_excel(paste0(input.dir, "/taxonomy_for_taxa_with_incomplete_itis_record.xlsx"))
 names(add.info.itis)
 
 #For bugs with taxonomy changes, replace previous name with reclassified name:
@@ -859,7 +859,7 @@ nrow(all.bugs.clean3)
 #(excluding lumped taxa for now)
 
 #load partial taxonomy table if needed
-tax.table.add<-as.data.frame(fread(paste0(output.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv")))
+tax.table.add<-as.data.frame(fread(paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv")))
 
 no.match2<-all.bugs.clean3 %>% 
     filter(!grepl("/", name)) %>% 
@@ -1017,7 +1017,7 @@ View(lumped.taxa) #47 lumped taxa
 
 
 #Write lumped taxa to table
-write_xlsx(lumped.taxa, paste0(output.dir, "/lumped_taxa_list.xlsx"))
+write_xlsx(lumped.taxa, paste0(input.dir, "/lumped_taxa_list.xlsx"))
 
 ```
 
@@ -1058,7 +1058,7 @@ Get taxonomy for lumped groups based on lowest common taxonomic designation (tha
 
 ```{r}
 
-lump.ID<-read_excel(paste0(output.dir, "/lumped_taxa_taxonomic_hierarchy.xlsx"))
+lump.ID<-read_excel(paste0(input.dir, "/lumped_taxa_taxonomic_hierarchy.xlsx"))
 nrow(lump.ID)
 names(lump.ID)
 
@@ -1156,7 +1156,7 @@ tax.table.CLEAN<-tax.table.ALL %>%
 nrow(tax.table.CLEAN)
 
 #Write to file:
-write_xlsx(tax.table.CLEAN, paste0(output.dir, "/taxonomy_table_ALL_MACROINVERT_TAXA.xlsx"))
+write_xlsx(tax.table.CLEAN, paste0(input.dir, "/taxonomy_table_ALL_MACROINVERT_TAXA.xlsx"))
 ```
 
 ## 2.7 Merge full taxonomy to occurrence data
@@ -1164,7 +1164,7 @@ write_xlsx(tax.table.CLEAN, paste0(output.dir, "/taxonomy_table_ALL_MACROINVERT_
 ```{r}
 
 #Read in taxonomy table if needed:
-tax.table.CLEAN<-read_excel(paste0(output.dir, "/taxonomy_table_ALL_MACROINVERT_TAXA.xlsx"))
+tax.table.CLEAN<-read_excel(paste0(input.dir, "/taxonomy_table_ALL_MACROINVERT_TAXA.xlsx"))
 
 #Are all names in count data present in the taxonomy table?
 
@@ -1243,7 +1243,7 @@ Write clean raw counts data to file:
 
 ```{r}
 
-write.csv(all.bugs.SUM, paste0(output.dir, "/Aggregated_invert_raw_count_data_cleaned.csv"))
+write.csv(all.bugs.SUM, paste0(input.dir, "/Aggregated_invert_raw_count_data_cleaned.csv"))
 
 ```
 
@@ -1254,7 +1254,7 @@ Explore number of sites:
 ```{r}
 
 #Read in cleaned data:
-all.bugs.SUM<-fread(paste0(output.dir, "/Aggregated_invert_raw_count_data_cleaned.csv"))
+all.bugs.SUM<-fread(paste0(input.dir, "/Aggregated_invert_raw_count_data_cleaned.csv"))
 
 #How many speciments total?
 #(post rarification)
@@ -1512,7 +1512,7 @@ Rarefy to \<=300 specimens. Note that some samples have fewer than 300 specimens
 
 #NOTE - NEEDS TO UPDATE TO CORRECT FILE HERE 
 #Read in raw count data if needed:
-all.bugs.SUM<-fread(paste0(output.dir, "/Aggregated_invert_raw_count_data_cleaned.csv"))
+all.bugs.SUM<-fread(paste0(input.dir, "/Aggregated_invert_raw_count_data_cleaned.csv"))
 
 
 #Look at min/median/mean/max values for existing raw counts:
@@ -1688,12 +1688,12 @@ family="Baetidae", subfamily="Baetinae", genus="Anafroptilum")
 View(ephem.add.table)
 
 #Write to file
-write.csv(ephem.add.table, paste0(output.dir, "/Ephemeroptera_lumped_family_classification.csv"), row.names=FALSE)
+write.csv(ephem.add.table, paste0(input.dir, "/Ephemeroptera_lumped_family_classification.csv"), row.names=FALSE)
 
 #Create lumped family ID of all family level IDs in emphem.add.table
 
 #Read in lumped ephemeroptera classification if needed
-ephem.add.table<-read.csv(paste0(output.dir, "/Ephemeroptera_lumped_family_classification.csv"))
+ephem.add.table<-read.csv(paste0(input.dir, "/Ephemeroptera_lumped_family_classification.csv"))
 
 Family.lump<-ephem.add.table %>% dplyr::select(family) %>% distinct() %>% 
   summarise(name = paste(family, collapse = "/"))
@@ -1842,7 +1842,7 @@ write_xlsx(rarified.fam, paste0(taxa.dir, "/Family_relative_abundance_rarified.x
 
 #read in family data if needed:
 
-Fam.abund<-read_excel(paste0(output.dir, "/Family_relative_abundance.xlsx"))
+Fam.abund<-read_excel(paste0(input.dir, "/Family_relative_abundance.xlsx"))
 
 #Total number of families
 Fam.abund %>% dplyr::select(family) %>% distinct()
