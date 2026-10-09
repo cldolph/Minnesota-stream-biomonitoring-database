@@ -8,9 +8,11 @@ Contact: dolph008\@umn.edu
 
 # Overview
 
-This repository contains macroinvertebrate relative abundance data and associated environmental data for streams and rivers in Minnesota, compiled from local, state and federal sources. The repository consists of information for 2.6 million macroinvertebrate specimens from 765 taxa collected across 4,737 unique sites in Minnesota (7,706 total site visits, which include repeat visits to some sites). The database also contains R Markdown scripts used to process and analyze data.
+This repository contains fish and macroinvertebrate relative abundance data and associated environmental data for streams and rivers in Minnesota, compiled from local, state and federal sources. The database also contains R Markdown scripts used to process and analyze data.
 
 Macroinvertebrate data was compiled from the following sources: U.S. Geological Survey (USGS), Environmental Protection Agency (EPA), Minnesota Pollution Control Agency (MPCA), Twin Cities Metropolitan Council, Carver County (MN), Dakota County Soil and Water Conservation District (MN), Anoka Conservation District (MN), Riley-Purgatory-Bluff Creek Watershed District (MN), Washington Conservation District (MN), Bassett Creek Watershed Management Commission (MN), Friends of the Mississippi River Stream Health Evaluation Program, Scott County Watershed Management Organization (MN), and Brown's Creek Watershed District (MN).
+
+Fish data was compiled from: U.S. Geological Survey (USGS), Environmental Protection Agency (EPA), Minnesota Pollution Control Agency (MPCA).
 
 Most data was obtained by direct request to the relevant agency. USGS and EPA data compiled using the finsync package in R (<https://usepa.github.io/finsyncR/>; Mahon et al., 2024).
 
@@ -28,9 +30,11 @@ This effort was funded by the **Legislative-Citizen Commission on Minnesota Reso
 
 # Datasets
 
-Macroinvertebrate data was compiled from multiple sources, and received considerable cleaning and processing prior to compilation.
+## Macroinvertebrate data
 
-## Processed macroinvertebrate data
+Macroinvertebrate data was compiled from multiple sources, and received considerable cleaning and processing prior to compilation. The repository consists of information for 2.6 million macroinvertebrate specimens from 765 taxa collected across 4,737 unique sites in Minnesota (7,706 total site visits, which include repeat visits to some sites).
+
+### Processed macroinvertebrate data
 
 All of the fully processed macroinvertebrate data files are in the folder `Data/processed_taxonomic_datasets` (See below). This folder contains 3 separate files:
 
@@ -46,23 +50,27 @@ Macroinvertebrate samples were collected with semi-quantitative methods (typical
 
 Taxonomic units were derived in the R Markdown file: `module_OTUs.Rmd` if you want to see more specific details of how data was assembled.
 
+## Fish data
+
+The processed fish data is located in the `Data/processed_taxonomic_datasets` folder in the file `Fish_relative_abundance.xlsx` .
+
 ## Input Data
 
-Files in the `Data/cleaned_input_data` folder represent intermediately-cleaned data (i.e., data processed into uniform columns), as well as ancillary data used to aid in the processing of taxonomic data in `module_OTUS.Rmd`.
+Files in the `Data/cleaned_input_data` folder represent intermediately-cleaned data (i.e., data processed into uniform columns), as well as ancillary data used to aid in the processing of taxonomic data in `module_invert_OTUS.Rmd and modeule_fish_OTUs.Rmd`.
 
 ## Environmental Data
 
-Files in the `Data/environmental_data` folder include EPA StreamCat attributes (<https://www.epa.gov/national-aquatic-resource-surveys/streamcat-dataset>) attributes for all macroinvertebrate sampling locations in the dataset. EPA’s StreamCat dataset contains information for over 600 different environmental metrics linked to individual stream reaches in the NHDv2Plus dataset (Hill et al., 2015). These metrics summarize diverse geospatial attributes -- including aspects of land cover including land use, impervious surfaces and road density, soil type, point source and nutrient inputs, and climatic factors (temperature and precipitation), among others – at the catchment and watershed scale draining into each reach.
+Files in the `Data/environmental_data` folder include EPA StreamCat attributes (<https://www.epa.gov/national-aquatic-resource-surveys/streamcat-dataset>) attributes for all sampling locations in the dataset. EPA’s StreamCat dataset contains information for over 600 different environmental metrics linked to individual stream reaches in the NHDv2Plus dataset (Hill et al., 2015). These metrics summarize diverse geospatial attributes -- including aspects of land cover including land use, impervious surfaces and road density, soil type, point source and nutrient inputs, and climatic factors (temperature and precipitation), among others – at the catchment and watershed scale draining into each reach.
 
 # R Markdown Scripts Used for Analysis
 
 This repository contains the following R Markdown scripts:
 
-- module_OTUs.Rmd - used to clean and process macroinvertebrate taxonomic information, with the output being the files in `Data/processed_taxonomic_datasets`
+- `module_invert_OTUs.Rmd` - used to clean and process macroinvertebrate taxonomic information compiled from all sources; the resulting output is in `Data/processed_taxonomic_datasets`
 
-- module_environmental_variables.Rmd - used to compile StreamCat and NHD attributes for macroinvertebrate sampling locations
+- `module_fish_OTUS.Rmd` - used to clean and process fish data compiled from all sources; the resulting output is in `Data/processed_taxonomic_datasets`
 
-- module_data_processing_finsyncR.Rmd - used to download and process macroinvertebrate data from USGS and EPA using the finsyncR package (Mahon et al., 2024)
+- `module_environmental_variables.Rmd` - used to compile geospatial attributes for biomonitoring locations
 
 # Citations
 
