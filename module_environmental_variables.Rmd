@@ -65,7 +65,7 @@ dir.create(file.path(root.dir, "/Data/GIS"))
 dir.create(file.path(root.dir, "/Data/Figures_Tables"))
 ```
 
-# 1 Load compiled biomonitoring data (fish and macroinvertebrate) 
+# 1 Load compiled biomonitoring data (fish and macroinvertebrate)
 
 Combine all station locations
 
@@ -82,6 +82,8 @@ Fish.station<-read_xlsx(paste0(taxa.dir, "/Fish_relative_abundance.xlsx"))|> dpl
 Stations<-bind_rows(Fam.abund.station, Fish.station) |> distinct()
 
 View(Stations)
+
+
 
 ```
 
@@ -227,7 +229,7 @@ View(loc_NHD)
 
 #write to file (without geometry)
 
-write_xlsx(loc_NHD %>% st_drop_geometry(), paste0(env.dir, "/loc_NHD.xlsx"))
+write_xlsx(loc_NHD %>% st_drop_geometry(), paste0(env.dir, "/Stations.xlsx"))
 ```
 
 ## 2.4 Get StreamCat attributes using StreamCatTools
