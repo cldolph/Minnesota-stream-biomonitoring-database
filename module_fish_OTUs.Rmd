@@ -1,0 +1,279 @@
+---
+title: "module_fish_OTUs"
+author: "Christy Dolph"
+date: "2026-10-08"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Overview
+
+This script checks and resolves operational taxonomic units (OTUs) for fish taxa and creates a rarified relative abundance dataset at several different taxonomic resolutions (family, genus, and mixed ID).
+
+Options:
+
+-throw out hybrids
+
+-throw out coarser than species IDs
+
+-for USGS/EPA, if contains ".x." list as hybrid with genus name
+
+\-
+
+# Set Up Workspace
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clean up workspace and load packages (or install if necessary)
+rm(list=ls())
+
+want <- c("readxl", "writexl", "tidyverse", "zoo", 
+          "tigris", "sf", "tmap", "purrr", "fs", "pak", "fuzzyjoin", "data.table", "stringr", "taxize")
+          
+          need <- want[!(want %in% installed.packages()[,"Package"])]
+if (length(need)) install.packages(need)
+lapply(want, function(i) require(i, character.only=TRUE))
+rm(want, need)
+
+
+#Designate directoriers:
+
+
+#Overall project directory:
+root.dir <- getwd() 
+root.dir
+
+#Input directory for raw/unprocessed data
+raw.dir<-paste0(root.dir, "/Data/biodata_raw")
+raw.dir
+
+#Output Data Directory for processed data:
+input.dir <- paste0(root.dir, "/Data/cleaned_input_data") 
+input.dir
+
+#Output directory for finalized taxonomic datasets
+taxa.dir<-paste0(root.dir, "/Data/processed_taxonomic_datasets")
+
+#Output directory for tables/figures
+fig.dir<-paste0(root.dir, "/Data/Figures_Tables")
+```
+
+# Load in all sources of data
+
+- MPCA
+
+- finsync (USGS and EPA data, preprocessed by Mahon et al 2024)
+
+Note that all data are raw counts.
+
+```{r}
+
+list.files(input.dir)
+
+mpca<-as.data.frame(fread(paste0(input.dir, "./mpca_fish_compiled.csv")))
+names(mpca)
+#View(mpca)
+
+nat<-as.data.frame(fread(paste0(input.dir, "./USGS_EPA_Fish_MN_long_finsync.csv")))
+names(nat)
+#View(nat)
+
+
+```
+
+QC check - check for duplicates in individual datasets
+
+```{r}
+
+##MPCA:
+mpca %>% janitor::get_dupes()
+#no duplicates
+
+
+#USGS/EPA:
+nat %>% 
+    filter(Number>0) %>% 
+    janitor::get_dupes()
+  
+#No dupes across all columns, but: 
+
+#When I subset columns to those I use in aggregated data, get duplicates:
+
+nat.dup.check<-
+nat %>% 
+ mutate(Date=as.Date(CollectionDate, format="%Y-%m-%d")) %>% #format date
+  dplyr::rename(Original_ID=SiteNumber, Year=CollectionYear, FullScientificName=Name, Latitude=Latitude_dd, Longitude=Longitude_dd, GearType=SampleMethod) %>% #format column names
+    mutate(replicate=1) %>%  #add replicate column (no site/date replicates in USGS/EPA dataset)
+    dplyr::select(Original_ID, Date, Year, Agency, FullScientificName, Number, Latitude, Longitude, replicate, GearType, COMID) %>% 
+  filter(Number>0) %>% 
+    janitor::get_dupes()
+
+
+
+```
+
+# Clean up data to match across datasets
+
+For MPCA, how many records are genus only (so species ID)
+
+```{r}
+
+(mpca |> filter(is.na(Species)) |> nrow())/nrow(mpca) #.5% of records are genus only ID - can exclude
+
+mpca2<-mpca |> filter(!is.na(Species)) |> 
+  mutate(Date=as.Date(Collection_Date, format="%Y-%m-%d")) |> 
+  dplyr::select(-c(Collection_Date))
+
+```
+
+For USGS/USEPA, format columns to match MPCA dataset
+
+```{r}
+
+
+#Cleaner USGS/USEPA data:
+nat2<-nat%>% 
+  mutate(Date=as.Date(CollectionDate, format="%Y-%m-%d")) %>% #format date
+  dplyr::rename(Original_ID=SiteNumber, Year=CollectionYear, FullScientificName=Name, Latitude=Latitude_dd, Longitude=Longitude_dd, GearType=SampleMethod) %>% #format column names
+  mutate(replicate=1) %>%  #add replicate column (no site/date replicates in USGS/EPA dataset)
+  dplyr::select(Original_ID, Date, Year, Agency, FullScientificName, Number, Latitude, Longitude, replicate, GearType, COMID) |> 
+  mutate(
+    FullScientificName = if_else(
+      str_detect(FullScientificName, fixed(".x.")),
+      str_replace(FullScientificName, "\\..*", " hybrid"),
+      FullScientificName)) |>  #replace any hybrid with "hybrid"
+  mutate(FullScientificName = str_replace_all(FullScientificName, "\\.", " ")) |> #format scientific name to match MPCA data
+  mutate(Genus = str_extract(FullScientificName, "^[^ ]+")) |>  #Extract genus name
+  mutate(Species = str_extract(FullScientificName, "(?<= )[^ ]+")) |> 
+  filter(Number>0) #remove 0 counts
+
+head(nat2)
+
+levels(factor(mpca2$FullScientificName))
+levels(factor(nat2$FullScientificName))
+
+#Check names that don't match across datasets
+#find names in col A that are not in col B
+setdiff(mpca2$FullScientificName, nat2$FullScientificName)
+
+setdiff(nat2$FullScientificName,mpca2$FullScientificName) #mpca dataset much more extensive - many more species 
+
+```
+
+Merge data sources to same columns.
+
+```{r}
+
+names(mpca2)
+names(nat2)
+
+
+all.fish<-bind_rows(
+  mpca2,
+  nat2)
+  
+
+nrow(all.fish)
+
+View(all.fish)
+
+#Fill out missing data if names match
+
+#lookup table to match common names from mpca dataset to scientific names
+lookup <- all.fish %>%
+  filter(!is.na(FullScientificName), !is.na(CommonName)) %>%
+  distinct(FullScientificName, Name_filled = CommonName)
+lookup
+
+# 2. Join and fill missing values
+all.fish2 <- all.fish %>%
+  left_join(lookup, by = "FullScientificName") %>%
+  mutate(CommonName = coalesce(CommonName, Name_filled)) %>%
+  select(-Name_filled)
+
+View(all.fish2 |> filter(!Agency=="MPCA"))
+
+#check for any remaining missing names - species in USGS/USEPA datasets that are not in MPCA dataset 
+
+missing.common<-all.fish2 |> filter(is.na(CommonName))  |> dplyr::select(FullScientificName) |> distinct()
+
+nrow(all.fish2)
+
+CommonName.missing<-c(
+"Eastern blacknose dace",
+"Rosyface shiner",
+"Allegheny pearl dace",
+"American pickerel",
+"American brook lamprey",
+"Slender chub hybrid",
+"Silver shiner",
+"Blue catfish",
+"Greenside darter",
+"Orangethroat darter",
+"Dusky darter")
+
+missing.lookup<-cbind(missing.common, CommonName.missing)
+
+missing.lookup
+
+#Join this table for remaining missing common names of species in USGS/USEPA but not in mpca dataset:
+
+all.fish3<-all.fish2 %>%
+  left_join(missing.lookup, by = "FullScientificName") %>%
+  mutate(CommonName = coalesce(CommonName, CommonName.missing)) %>%
+  select(-CommonName.missing) |> 
+  mutate(CommonName=str_to_sentence(CommonName)) |> #capitalize all common names
+#remove NA values for number - checked and these were NA in original mpca data - no count
+  filter(!is.na(Number))
+
+View(all.fish3 |> filter(FullScientificName %in% missing.common$FullScientificName))
+
+View(all.fish3)
+
+#any missing data?
+View(all.fish3 |>  dplyr::select(-c(tsn,COMID))|> filter(if_any(everything(), is.na)))
+
+#there is a small number of rows of MPCA data for which GearType is not available, I think likely OK to assume electroshocking
+
+```
+
+Quick map check:
+
+```{r}
+
+all.fish_sf<-st_as_sf(all.fish3, coords=c("Longitude", "Latitude"), crs=4269, remove=FALSE)
+
+names(all.fish_sf)
+
+plot(all.fish_sf$geometry)
+
+```
+
+# Check for duplicates across datasets
+
+```{r}
+
+all.fish3 |> dplyr::select(Latitude, Longitude, Date, Agency) |> distinct() |> group_by(Latitude, Longitude, Date)|> count() |> filter(n>1)
+
+```
+
+# Calculate Relative Abundance
+
+```{r}
+
+#Sum count by site/date
+
+all.fish4<-all.fish3 |>
+  group_by(Original_ID, Date) |> 
+  mutate(TotalCount=sum(Number)) |> 
+  ungroup() |> 
+  mutate(Relative_Abund=Number/TotalCount)
+
+View(all.fish4)
+
+#save to file
+#exclude tsn and COMID for now (may want back later)
+write_xlsx(all.fish4 |> dplyr::select(-c(tsn, COMID)), paste0(taxa.dir, "/Fish_relative_abundance.xlsx"))
+```

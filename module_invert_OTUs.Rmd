@@ -9,7 +9,7 @@ editor_options:
 
 # Overview and background
 
-This script checks and resolves operational taxonomic units (OTUs) for fish and benthic macroinvertebrate taxa.
+This script checks and resolves operational taxonomic units (OTUs) for benthic macroinvertebrate taxa and creates a rarified relative abundance dataset at several different taxonomic resolutions (family, genus, and mixed ID).
 
 Useful resources:
 
@@ -1597,7 +1597,7 @@ View(Rel.abund)
 
 #Write to file
 
-write.csv(Rel.abund, paste0(taxa.dir, "/MixedID_relative_abundance_rarified.csv"), row.names=FALSE)
+write.csv(Rel.abund, paste0(taxa.dir, "/Macroinvert_MixedID_relative_abundance_rarified.csv"), row.names=FALSE)
 
 
 ```
@@ -1833,7 +1833,7 @@ rarified.fam$Rel_abund_fam=rarified.fam$FamRarifyCount/rarified.fam$Total_fam_AL
 View(rarified.fam)
 
 #Write rarified family level data to file 
-write_xlsx(rarified.fam, paste0(taxa.dir, "/Family_relative_abundance_rarified.xlsx"))
+write_xlsx(rarified.fam, paste0(taxa.dir, "/Macroinvert_Family_relative_abundance_rarified.xlsx"))
 ```
 
 ## 5.5 Exploration of Family-level data
@@ -1963,7 +1963,7 @@ rarified.genus$Rel_abund_fam=rarified.genus$RarifyCount/rarified.genus$Total_ALL
 View(rarified.genus)
 
 #Write rarified family level data to file 
-write_xlsx(rarified.genus, paste0(taxa.dir, "/Genus_relative_abundance_rarified.xlsx"))
+write_xlsx(rarified.genus, paste0(taxa.dir, "/Macroinvert_Genus_relative_abundance_rarified.xlsx"))
 
 ```
 

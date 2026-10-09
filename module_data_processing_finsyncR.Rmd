@@ -3,6 +3,8 @@ title: "module_EPA_USGS_finsync"
 author: "Christy Dolph"
 date: "2026-04-14"
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 Overview: use the finsyncR package to access harmonized EPA and USGS macroinvertebrate (and fish) data
@@ -51,7 +53,7 @@ root.dir <- getwd()
 root.dir
 
 #Output Data Directory for processed data:
-output.dir <- paste0(root.dir, "/Data/biodata_processed") 
+output.dir <- paste0(root.dir, "/Data/cleaned_input_data") 
 output.dir
 
 #Vignettes:
@@ -71,6 +73,34 @@ Note: calling *vignettes()* isn't working, but vignettes were downloaded directl
 vignettes("BackCalculation", "finsyncR")
 
 help("getInvertData")
+```
+
+# Get Fish Data
+
+```{r}
+
+Fish <- getFishData(dataType="abun",
+                    taxonLevel = "Species",
+                    agency = c("USGS","EPA"),
+                    standardize = "none",
+                    hybrids = TRUE,
+                    sharedTaxa = FALSE,
+                    boatableStreams = TRUE)
+                    
+
+View(Fish)
+names(Fish)
+
+#Convert to long form
+Fish_long<-Fish %>% 
+  pivot_longer(
+    cols = 
+      Luxilus.cornutus:Salvelinus.namaycush, 
+    names_to = "Name", 
+    values_to = "Number"
+  )
+
+View(Fish_long)
 ```
 
 # Get Invert Data
@@ -168,6 +198,8 @@ View(i2_RawCount)
 
 inverts_sf<-st_as_sf(i2_RawCount, coords=c("Longitude_dd", "Latitude_dd"), crs=4269)
 
+fish_sf<-st_as_sf(Fish_long, coords=c("Longitude_dd", "Latitude_dd"), crs=4269, remove=FALSE)
+
 ```
 
 Clip out MN data
@@ -190,6 +222,8 @@ MN<-states_sf %>%
 Inverts_MN<-st_intersection(inverts_sf, MN) %>%  mutate(lon = st_coordinates(.)[,1],
          lat = st_coordinates(.)[,2])
 
+Fish_MN<-st_intersection(fish_sf, MN)
+
 
 ```
 
@@ -197,9 +231,11 @@ Quick map check:
 
 ```{r}
 
+
 tm_shape(MN)+
   tm_borders()+
-  tm_shape(Inverts_MN)+
+  #tm_shape(Inverts_MN)+
+  tm_shape(Fish_MN)+
   tm_dots()
 ```
 
@@ -227,6 +263,8 @@ View(Inverts_long)
 
 #Write to table
 write.csv(Inverts_long %>% st_drop_geometry(), paste0(output.dir, "./USGS_EPA_Inverts_MN_long_finsync.csv"), row.names=FALSE)
+
+write.csv(Fish_MN |> st_drop_geometry(), paste0(output.dir, "./USGS_EPA_Fish_MN_long_finsync.csv"), row.names=FALSE)
 
 ```
 

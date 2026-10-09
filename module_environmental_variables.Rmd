@@ -50,6 +50,9 @@ root.dir
 env.dir <- paste0(root.dir, "/Data/environmental_data") 
 env.dir
 
+#Output directory for finalized taxonomic datasets
+taxa.dir<-paste0(root.dir, "/Data/processed_taxonomic_datasets")
+
 
 #Output directory for tables/figures
 fig.dir<-paste0(root.dir, "/Data/Figures_Tables")
@@ -62,15 +65,23 @@ dir.create(file.path(root.dir, "/Data/GIS"))
 dir.create(file.path(root.dir, "/Data/Figures_Tables"))
 ```
 
-# 1 Load Macroinvertebrate data
+# 1 Load compiled biomonitoring data (fish and macroinvertebrate) 
 
-Data summarized at family or genus level.
+Combine all station locations
 
 ```{r}
 
-#list.files(env.dir)
+list.files(taxa.dir)
 
-Fam.abund<-read_xlsx(paste0(env.dir, "/Family_relative_abundance.xlsx"))
+Fam.abund.station<-read_xlsx(paste0(taxa.dir, "/Macroinvert_Family_relative_abundance_rarified.xlsx")) |> dplyr::select(Original_ID, Latitude, Longitude, Agency) |> distinct()
+
+Fish.station<-read_xlsx(paste0(taxa.dir, "/Fish_relative_abundance.xlsx"))|> dplyr::select(Original_ID, Latitude, Longitude, Agency) |> distinct()
+
+#Combine all stations
+
+Stations<-bind_rows(Fam.abund.station, Fish.station) |> distinct()
+
+View(Stations)
 
 ```
 
@@ -82,7 +93,7 @@ Fam.abund<-read_xlsx(paste0(env.dir, "/Family_relative_abundance.xlsx"))
 
 #Convert sample locations to spatial object:}
 
-loc_sf<-st_as_sf(Fam.abund %>% dplyr::select(Original_ID, Longitude, Latitude) %>% distinct(), coords=c("Longitude","Latitude"), crs=4269, remove=FALSE)
+loc_sf<-st_as_sf(Stations, coords=c("Longitude","Latitude"), crs=4269, remove=FALSE)
 
 View(loc_sf)
 
@@ -340,6 +351,135 @@ sc_data %>%
 
 #Note - may want to work with sc_data before merging to parameter data (be more selective) as otherwise the dataframe is very large  
 
+```
+
+UPDATE IN PROGRESS: GET FULLER LIST OF STREAMCAT ATTRIBUTES FOR ALL BIOMONITORING SITES
+
+-ideally, run for all sites, not just inverts
+
+```{r}
+
+
+#Note - pulling StreamCat attributes using StreamCatTools seems to function better in the morning hours; afternoon is more likely to see a 502 bad gateway error (maybe based on broader traffic etc)
+
+#Get a list of all Streamcat attributes available: 
+All.Streamcat<-sc_get_params(param="metric_names")
+
+
+#View(as.data.frame(All.Streamcat))
+
+#Get all variable descriptions!!
+Definitions<-sc_get_params(param='variable_info')
+#View(Definitions)
+
+#Subset the Streamcat attributes you want to use
+#eliminate fire related, containing "burn", "sev", "fire", "procmask"
+#remove veg change, "vegresp", forest loss "frstloss"
+#select relevant NLCD year & eliminate all other years
+#the following attributes are all based on NANI and are available every year, retain one of each variable for the year of interest, exclude all others: "n_ff, p_ff, n_uf,p_uf,p_hw,n_hw,n_lw,p_lw,n_cr,p_cr,n_cf,n_lwr,p_lwr,n_ags,p_ags"
+
+All.Streamcat<-as.data.frame(All.Streamcat)
+
+
+#Clean up metrics filtering logic (fix vector reference in dplyr)
+Streamcat.select <- All.Streamcat %>% 
+  filter(!grepl('burn|sev|fire|procmask', All.Streamcat)) #%>% 
+  #filter(!grepl('2001|2004|2006|2008|2013|2016|2019', All.Streamcat)) %>% 
+  #filter(!grepl('_19|_20', All.Streamcat))
+
+metrics_vec <- Streamcat.select$All.Streamcat
+
+#Or for all metrics
+#metrics_vsc<-All.Streamcat$All.Streamcat
+
+#Pull metrics sequentially or in small groups, otherwise will hit bad gateway error  
+
+metric_chunks <- split(metrics_vec, ceiling(seq_along(metrics_vec) / 5))
+
+#-----------------------------------------------------------
+#Get cat and ws scale metrics
+#-----------------------------------------------------------
+
+#Check time
+start.time<-Sys.time()
+start.time
+# Loop over metric chunks instead of sending all at once
+sc_data_list <- lapply(metric_chunks, function(m_chunk) {
+  m_list <- paste0(m_chunk, collapse = ",")
+  
+  # Fetch data across COMIDs for this metric subset
+  # Using county or state parameter if fetching all COMIDs in Illinois
+  tryCatch({
+    sc_get_data(
+      metric = m_list, 
+      aoi = "cat,ws", 
+      state = "MN", # Direct state fetch if fetching all of Illinois
+      showAreaSqKm = FALSE
+    )
+  }, error = function(e) {
+    message("Failed chunk: ", e$message)
+    return(NULL)
+  })
+})
+
+# Merge columns across results
+sc_data <- Reduce(function(x, y) merge(x, y, by = "comid", all = TRUE), sc_data_list)
+
+#Write to file to save intermediate work
+write.csv(sc_data, paste0(dir.output, "/Streamcat_MNBIO_cat_ws.csv"))
+
+#------------------------------------------------------------
+#Run again for riparian attributes
+#-----------------------------------------------------------
+
+#Hm, i wonder if i need to subset to attributes that are available at riparian scale - see definitions?
+
+# Fetch data across COMIDs for this metric subset
+# Using county or state parameter if fetching all COMIDs in Illinois
+start.time<-Sys.time()
+start.time
+sc_data_list <- lapply(metric_chunks, function(m_chunk) {
+  m_list <- paste0(m_chunk, collapse = ",")
+  
+  tryCatch({
+    sc_get_data(
+      metric = m_list, 
+      aoi = "catrp100,wsrp100", 
+      state = "MN", # Direct state fetch if fetching all of Illinois
+      showAreaSqKm = FALSE
+    )
+  }, error = function(e) {
+    message("Failed chunk: ", e$message)
+    return(NULL)
+  })
+})
+
+# Merge columns across results
+sc_data_rp <- Reduce(function(x, y) merge(x, y, by = "comid", all = TRUE), sc_data_list)
+
+end.time<-Sys.time()
+end.time
+
+end.time-start.time 
+#Write to file to save intermediate work
+write.csv(sc_data_rp, paste0(dir.output, "/Streamcat_MNBIO_catRP_wsRP.csv"))
+
+
+#Merge to grid points
+
+#first cat, ws: 
+grid.streamcat<-left_join(grid, sc_data, by="comid")
+
+head(grid.streamcat)
+
+#then catrp100, wsrp100
+
+grid.streamcat.all<-left_join(grid.streamcat, sc_data_rp, by="comid")
+
+names(grid.streamcat.all)
+
+#Write to file to save intermediate work (use fwrite for large file, much faster than write.csv)
+fwrite(grid.streamcat.all, paste0(dir.output, "/grid_streamcat.MNBIO.all.csv"))
 ```
 
 ## 2.5 Merge StreamCat attributes by COMID to sampling location

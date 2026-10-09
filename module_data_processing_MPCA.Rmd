@@ -1,0 +1,353 @@
+---
+title: "module_MPCA_data_processing"
+author: "Christy Dolph"
+date: "2026-04-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Overview
+
+This script provides initial processing of biomonitoring datasets received from the Minnesota Pollution Control Agency. Excel input files used below were exported from the MPCA Access Database.
+
+# Workspace Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clean up workspace and load packages (or install if necessary)
+#rm(list=ls())
+
+want <- c("readxl", "writexl", "tidyverse", "zoo", 
+          "sf", "tmap", "purrr", "fs", "janitor")
+          
+          need <- want[!(want %in% installed.packages()[,"Package"])]
+if (length(need)) install.packages(need)
+lapply(want, function(i) require(i, character.only=TRUE))
+rm(want, need)
+
+#Overall project directory:
+root.dir <- getwd() 
+root.dir
+
+
+#Assign Directories 
+
+
+#Output Data Directory for processed data:
+output.dir <- paste0(root.dir, "/Data/cleaned_input_data") 
+output.dir
+
+#Raw input data directory:
+mpca.dir<-paste0(root.dir, "/Data/biodata_raw/MPCA")
+```
+
+# Read in biodata
+
+## i. Macroinvertebrates
+
+MPCA macroinvertebrate data includes data collected by different methods, described in 'Protocol' column. I will select only records collected via 'QMH' = "Qualitative Multi-Habitat", which is 85% of all records.
+
+-Keep life stage as larval and adult records may need to be combined
+
+```{r}
+
+#look at all files:
+list.files(mpca.dir)
+
+#read in macroinvertbrate data
+mpca.bugs<-read_excel(paste0(mpca.dir, "/DataInverts_WriteOff.xlsx"))
+
+names(mpca.bugs)
+
+#Check for duplicates
+View(mpca.bugs %>% janitor::get_dupes()) #no duplicates
+
+#Read in taxonomic info
+tax<-read_excel(paste0(mpca.dir, "/TaxaListInverts_WriteOff.xlsx"))
+
+names(tax)
+
+mpca.tax<-merge(mpca.bugs, tax %>% dplyr::select(-c(Name1, Name2, CommonName)), by=c("tsn"))
+
+#Check number of rows lost:
+nrow(mpca.bugs)-nrow(mpca.tax)
+
+#Check for duplicates
+View(mpca.bugs %>% janitor::get_dupes()) #no duplicates
+
+#very small number of rows (3) lost after merging with taxa table
+
+names(mpca.tax)
+
+```
+
+## ii. Fish
+
+```{r}
+
+#look at all files:
+list.files(mpca.dir)
+
+#read in macroinvertbrate data
+mpca.fish<-read_excel(paste0(mpca.dir, "/DataFish_WriteOff.xlsx"))
+
+names(mpca.fish)
+
+#Check for duplicates
+mpca.fish %>% janitor::get_dupes() #no duplicates
+
+#Read in taxonomic info
+tax.fish<-read_excel(paste0(mpca.dir, "/TaxaListFish_WriteOff.xlsx"))
+
+names(tax.fish)
+
+mpca.tax.fish<-merge(mpca.fish, tax.fish %>% dplyr::select(-c(Name1, Name2, CommonName)), by=c("tsn"))
+
+#Check number of rows lost:
+nrow(mpca.fish)-nrow(mpca.tax.fish) #should be 0
+
+```
+
+# Read in & merge site info to taxonomic data
+
+```{r}
+
+list.files(mpca.dir)
+
+#Read in site and visit info and merge
+#(remove 1 duplicate from site table)
+
+sites<-read_excel(paste0(mpca.dir, "/Station_WriteOff.xlsx"))
+
+visits<-read_excel(paste0(mpca.dir, "/Visit_Writeoff.xlsx"))
+nrow(visits)
+
+site.visit<-merge(sites %>% distinct(), visits, by=c("FieldNum"))
+nrow(site.visit)
+
+names(site.visit)
+
+visit.fish<-read_excel(paste0(mpca.dir, "/VisitFish_WriteOff.xlsx"))
+names(visit.fish)
+
+
+#Add info about gear type from VisitFish table:
+site.visit.fish<-left_join(site.visit, visit.fish, by=c("VisitNum"))
+nrow(site.visit.fish)
+
+#View(site.visit.fish)
+
+```
+
+## i. Merge site info to macroinvertebrate data
+
+```{r}
+
+
+#merge station info to bug data
+#first fix any potential formatting issues with VisitNum and FieldNum
+
+mpca.info<-merge(
+  
+  mpca.tax %>% 
+    mutate(across(c(FieldNum, VisitNum), ~ toupper(as.character(.x)))) %>% 
+    dplyr::select(-c(DateEntered, Comments.x, Comments.y)),
+  
+  site.visit %>% 
+    mutate(across(c(FieldNum, VisitNum), ~ toupper(as.character(.x)))) %>% 
+    filter(VisitType=="bugs") %>%  #select macroinvert visits only 
+    dplyr::select(-c(DateEntered, Comments.x)),
+  
+  , by=c("VisitNum", "FieldNum"))
+names(mpca.info)
+
+#Check number of rows lost/gained
+nrow(mpca.tax)-nrow(mpca.info) 
+
+#Check for duplicates
+mpca.info %>% janitor::get_dupes()
+#no duplicates
+
+#ID differences - find rows that didn't join
+
+missing<-anti_join(
+  mpca.tax %>% 
+    mutate(across(c(FieldNum, VisitNum), ~ toupper(as.character(.x)))) %>% 
+    dplyr::select(-c(DateEntered, Comments.x, Comments.y)),
+  
+  site.visit %>% 
+    mutate(across(c(FieldNum, VisitNum), ~ toupper(as.character(.x)))) %>% 
+    dplyr::select(-c(DateEntered, Comments.x)),
+  
+  , by=c("VisitNum", "FieldNum"))
+
+View(missing)
+
+levels(factor(missing$VisitNum))
+
+#OK, there are some discrepancies in the original data for these rows - the FieldNum in the DataInverts file doesn't match the FieldNum in the Visit and VisitInvert file for these Visit Numbers - 9 visit numbers in total 
+
+#I think OK to drop these data as record keeping errors 
+
+
+```
+
+## ii. Merge site info to fish data
+
+```{r}
+
+#merge station info to bug data
+#first fix any potential formatting issues with VisitNum and FieldNum
+
+names(mpca.tax.fish)
+
+mpca.info.fish<-merge(
+  
+  mpca.tax.fish %>% 
+    mutate(across(c(FieldNum, VisitNum), ~ toupper(as.character(.x)))) %>% 
+    dplyr::select(-c(DateEntered, CNCode.x, CNCode.y)),
+  
+  site.visit.fish %>% 
+    mutate(across(c(FieldNum, VisitNum), ~ toupper(as.character(.x)))) %>% 
+    filter(VisitType=="fish") %>%  #select macroinvert visits only 
+    dplyr::select(-c(DateEntered, Comments.x)),
+  
+  , by=c("VisitNum", "FieldNum"))
+names(mpca.info.fish)
+
+#Check number of rows lost/gained
+nrow(mpca.tax.fish)-nrow(mpca.info.fish) 
+
+#Check for duplicates
+mpca.info.fish %>% janitor::get_dupes()
+#no duplicates
+
+
+```
+
+# Number of replicates
+
+Create replicate column for more than one visit for site/date combo
+
+Add a seqential number for each unique Visit within a Site/Date group
+
+```{r}
+
+#Macroinvertebrates:
+names(mpca.info)
+
+replicates<-mpca.info %>% 
+  dplyr::select(FieldNum, VisitDate, VisitNum) %>% 
+  distinct() %>% 
+  group_by(FieldNum, VisitDate) %>%  
+  mutate(replicate = row_number())
+
+#replicates
+
+View(replicates %>% filter(replicate>1))
+View(replicates %>% filter(FieldNum=="96SC034"))
+
+mpca.info.rep<-merge(mpca.info, replicates, by=c("FieldNum", "VisitDate", "VisitNum"))
+
+names(mpca.info.rep)
+
+nrow(mpca.info)
+nrow(mpca.info.rep)
+
+#Fish:
+
+names(mpca.info.fish)
+
+replicates<-mpca.info.fish %>% 
+  dplyr::select(FieldNum, VisitDate, VisitNum) %>% 
+  distinct() %>% 
+  group_by(FieldNum, VisitDate) %>%  
+  mutate(replicate = row_number())
+
+#replicates
+
+#View(replicates %>% filter(replicate>1))
+
+mpca.info.rep.fish<-merge(mpca.info.fish, replicates, by=c("FieldNum", "VisitDate", "VisitNum"))
+
+names(mpca.info.rep.fish)
+
+nrow(mpca.info.fish)
+nrow(mpca.info.rep.fish)
+
+```
+
+# Subset columns and write to file
+
+## i. Macroinvertebrates
+
+```{r}
+#Target columns needed to combine with other datasets 
+
+names(mpca.info.rep)
+
+target_cols<-c("Original_ID",	"Collection_Date", "Season",	"Year",	"Replicate",	"Agency",	"Collected_by",	"Class", "Subclass", "Order", "Family",	"Genus", "Species", "Original_Taxon",	"Number",	"Notes", "TSN",	"Site", "Latitude", "Longitude", "Northing", "Easting", "total_replicates")
+
+#Subset to needed columns and QMH samples
+mpca.all<- mpca.info.rep %>% 
+  filter(Protocol=="QMH") %>%
+  dplyr::rename(Original_ID=FieldNum, Number=Count, Original_Taxon=Taxon, Latitude=LAT8xDD, Longitude=LON8xDD, Collection_Date=VisitDate, Year=VisitYear) %>% 
+  mutate(Agency="MPCA") %>% 
+  mutate(Collection_Date=as.Date(Collection_Date, format="%m/%d/%Y")) %>% 
+  dplyr::select(Original_ID, Collection_Date, Year, Agency, Family, Genus, Original_Taxon, Number, tsn, Latitude, Longitude, LifeStage, replicate)
+
+names(mpca.all)
+
+#View(mpca.all)
+
+#Write to file
+
+write.csv(mpca.all, paste0(output.dir, "/mpca_inverts_compiled.csv"), row.names=FALSE)
+```
+
+## ii. Fish
+
+```{r}
+
+
+#Target columns needed to combine with other datasets 
+
+names(mpca.info.rep.fish)
+
+target_cols<-c("Original_ID",	"Collection_Date", "Season",	"Year",	"Replicate",	"Agency",	"Collected_by",	"Class", "Subclass", "Order", "Family",	"Genus", "Species", "Original_Taxon",	"Number",	"Notes", "TSN",	"Site", "Latitude", "Longitude", "Northing", "Easting", "total_replicates")
+
+#Subset to needed columns and QMH samples
+mpca.all.fish<- mpca.info.rep.fish %>% 
+  dplyr::rename(Original_ID=FieldNum, Latitude=LAT8xDD, Longitude=LON8xDD, Collection_Date=VisitDate, Year=VisitYear, Genus=Name1, Species=Name2) %>% 
+  mutate(FullScientificName = paste(Genus, Species, sep = " ")) |> 
+  mutate(Agency="MPCA") %>% 
+  mutate(Collection_Date=as.Date(Collection_Date, format="%m/%d/%Y")) %>% 
+  dplyr::select(Original_ID, Collection_Date, Year, Agency,Genus,Species, FullScientificName, CommonName, tsn, Number, Latitude, Longitude, replicate, GearType)
+
+names(mpca.all.fish)
+
+#View(mpca.all.fish)
+
+#Write to file
+
+write.csv(mpca.all.fish, paste0(output.dir, "/mpca_fish_compiled.csv"), row.names=FALSE)
+
+```
+
+# Data summary
+
+```{r}
+
+#Date range
+
+mpca.all %>% dplyr::summarise(mindate=min(Collection_Date), maxdate=max(Collection_Date))
+
+#Number of unique sites
+mpca.all %>% dplyr::select(Latitude, Longitude) %>% distinct() %>% nrow()
+
+#View taxonomy
+
+View(mpca.all %>% dplyr::select(Family, Genus, Original_Taxon))
+```
