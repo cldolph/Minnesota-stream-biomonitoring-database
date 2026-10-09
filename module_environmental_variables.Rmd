@@ -227,7 +227,7 @@ View(loc_NHD)
 
 #write to file (without geometry)
 
-write_xlsx(loc_NHD %>% st_drop_geometry(), paste0(env.dir, "loc_NHD.xlsx"))
+write_xlsx(loc_NHD %>% st_drop_geometry(), paste0(env.dir, "/loc_NHD.xlsx"))
 ```
 
 ## 2.4 Get StreamCat attributes using StreamCatTools
@@ -242,116 +242,7 @@ StreamCat Variable list can be seen here (however, note that not all the variabl
 
 Some additional metadata on new Streamcat attributes: <https://pasteur.epa.gov/uploads/10.23719/1532282/documents/StreamCatNNI_readme.txt>
 
-```{r}
-
-#Get a list of all Streamcat attributes available:
-
-All.Streamcat<-sc_get_params(param="metric_names") 
-All.Streamcat  
-
-#View(as.data.frame(All.Streamcat))  
-
-#Get all variable descriptions!! And write to table 
-
-Definitions<-sc_get_params(param='variable_info') 
-
-#View(Definitions)  
-
-write.csv(Definitions, paste0(env.dir, "./StreamCat_Variable_Definitions.csv", row.names=FALSE))  
-
-All.Streamcat<-as.data.frame(All.Streamcat)  
-
-#Option to exclude variables you don't want or include only those you do want:
-
-selected.var<-c(
-'pctcrop',
-'pctgrs',
-'pcthay',
-'pctconif',
-'pctdecid',
-'pcthbwet',
-'pctimp',
-'pctmxfst',
-'pctow',
-'pctshrb',
-'pcturbhi',
-'pcturbmd',
-'pcturbop',
-'pctwdwet')
-
-Streamcat.select<- All.Streamcat %>% 
-  filter(grepl(paste(selected.var, collapse = "|"), All.Streamcat))
-
-  #include select variables
-
-#or exclude select variables
-#%>%    filter(!grepl('burn|sev|fire|procmask|vegresp|frstloss', All.Streamcat))%>%    filter(!grepl('2001|2004|2006|2008|2011|2013|2016', All.Streamcat)) %>%    filter(!grepl( "_19|_20", All.Streamcat))   
-
-View(Streamcat.select)  
-
-#Create list of select attributes in appropriate format for sc_get_data() 
-
-metric.list=paste0(Streamcat.select$All.Streamcat, collapse=",") 
-metric.list 
-  
-
-##Pull StreamCat Data using sc_get_data: 
-#For large datasets, a very large data request to sc_get_data appears to crash it out;  
-#So split data into equal chunks and apply function, then combine (split, apply, combine) 
-#filter to set of unique comids associated with sample data  
-
-# Define chunk size, adjust if needed: 
-
-#Read in loc_NHD if needed (sampling sites w/COMID):
-
-loc_NHD<-read_excel(paste0(env.dir, "/loc_NHD.xlsx"))
-
-length(loc_NHD$comid)
-
-chunk_size <- round(length(unique(loc_NHD$comid))/25) 
-chunk_size  
-
-# Split COMIDs into chunks 
-
-comid_chunks <- split(unique(loc_NHD$comid),                        ceiling(seq_along(unique(loc_NHD$comid)) / chunk_size))
-
-
-
-# Iterate over chunks, call sc_get_data, and combine results #(takes a few minutes)  
-
-Start.time<-Sys.time()
-Start.time
-
-sc_data_list <- lapply(comid_chunks, function(chunk) {   
-  comid.list <- paste0(chunk, collapse = ",")   
-  sc_get_data(metric = metric.list, aoi = "cat,ws,catrp100,wsrp100", comid = comid.list, showAreaSqKm=TRUE) })   
-
-End.time<-Sys.time()
-
-End.time-Start.time
-
-# Combine all results into one dataframe 
-
-sc_data <- do.call(rbind, sc_data_list)  
-
-
-# Preview 
-head(sc_data) 
-names(sc_data) 
-View(sc_data) 
-
-nrow(loc_NHD) 
-nrow(sc_data) #Note that some values were dropped - these may be sink catchments (not associated with NHD flowline)  
-
-#Average catchment area for study region: 
-
-sc_data %>% 
-  dplyr::select(catareasqkm, wsareasqkm) %>% 
-  summarise(mean.catchment.area=mean(catareasqkm), median.catchment.area=median(catareasqkm), mean.ws.area=mean(wsareasqkm), median.ws.area=median(wsareasqkm))  
-
-#Note - may want to work with sc_data before merging to parameter data (be more selective) as otherwise the dataframe is very large  
-
-```
+Note: To access StreamCat data for a large number of sites, the most successful strategy appears to be to pull them by state. If you try to pull by long list of comids, you often get a bad request error. But, pulling by state can take considerable time (1-2 hours).
 
 UPDATE IN PROGRESS: GET FULLER LIST OF STREAMCAT ATTRIBUTES FOR ALL BIOMONITORING SITES
 
@@ -413,7 +304,7 @@ sc_data_list <- lapply(metric_chunks, function(m_chunk) {
     sc_get_data(
       metric = m_list, 
       aoi = "cat,ws", 
-      state = "MN", # Direct state fetch if fetching all of Illinois
+      state = "MN", # Direct state fetch if fetching all of Minnesota
       showAreaSqKm = FALSE
     )
   }, error = function(e) {
@@ -425,14 +316,14 @@ sc_data_list <- lapply(metric_chunks, function(m_chunk) {
 # Merge columns across results
 sc_data <- Reduce(function(x, y) merge(x, y, by = "comid", all = TRUE), sc_data_list)
 
+View(sc_data)
+
 #Write to file to save intermediate work
-write.csv(sc_data, paste0(dir.output, "/Streamcat_MNBIO_cat_ws.csv"))
+fwrite(sc_data, paste0(env.dir, "/Streamcat_MNBIO_cat_ws.csv"))
 
 #------------------------------------------------------------
 #Run again for riparian attributes
 #-----------------------------------------------------------
-
-#Hm, i wonder if i need to subset to attributes that are available at riparian scale - see definitions?
 
 # Fetch data across COMIDs for this metric subset
 # Using county or state parameter if fetching all COMIDs in Illinois
@@ -445,7 +336,7 @@ sc_data_list <- lapply(metric_chunks, function(m_chunk) {
     sc_get_data(
       metric = m_list, 
       aoi = "catrp100,wsrp100", 
-      state = "MN", # Direct state fetch if fetching all of Illinois
+      state = "MN", # Direct state fetch if fetching all of Minnesota
       showAreaSqKm = FALSE
     )
   }, error = function(e) {
@@ -462,24 +353,9 @@ end.time
 
 end.time-start.time 
 #Write to file to save intermediate work
-write.csv(sc_data_rp, paste0(dir.output, "/Streamcat_MNBIO_catRP_wsRP.csv"))
+fwrite(sc_data_rp, paste0(env.dir, "/Streamcat_MNBIO_catRP_wsRP.csv"))
 
 
-#Merge to grid points
-
-#first cat, ws: 
-grid.streamcat<-left_join(grid, sc_data, by="comid")
-
-head(grid.streamcat)
-
-#then catrp100, wsrp100
-
-grid.streamcat.all<-left_join(grid.streamcat, sc_data_rp, by="comid")
-
-names(grid.streamcat.all)
-
-#Write to file to save intermediate work (use fwrite for large file, much faster than write.csv)
-fwrite(grid.streamcat.all, paste0(dir.output, "/grid_streamcat.MNBIO.all.csv"))
 ```
 
 ## 2.5 Merge StreamCat attributes by COMID to sampling location
@@ -490,24 +366,23 @@ Something else important to know! StreamCat summarizes attributes at both the wa
 
 ```{r}
 
-#Merge streamcat attributes to unique sample locations:
+#Merge to grid points
 
+#first cat, ws: 
+BIO.streamcat<-left_join(loc_NHD, sc_data, by="comid")
 
-sites.streamcat<-merge(loc_NHD %>% st_drop_geometry(),    
-                      
-                      sc_data,       
-                      by=c("comid"))  
+head(BIO.streamcat)
 
-nrow(sites.streamcat) 
+#then catrp100, wsrp100
 
-names(sites.streamcat)  
+BIO.streamcat.all<-left_join(BIO.streamcat, sc_data_rp, by="comid")
 
-#View(sites.streamcat)
+names(BIO.streamcat.all)
 
+View(BIO.streamcat.all)
 
-#Write the streamcat attributes by site to file: 
-
-write.csv(sites.streamcat, paste0(env.dir, "./StreamCat_data_for_invert_sites.csv"))
+#Write to file to save intermediate work (use fwrite for large file, much faster than write.csv)
+fwrite(BIO.streamcat.all, paste0(env.dir, "/Streamcat.MNBIO.all.csv"))
 ```
 
 # 3 Explore Environmental Data
@@ -520,7 +395,7 @@ write.csv(sites.streamcat, paste0(env.dir, "./StreamCat_data_for_invert_sites.cs
 
 #Load StreamCat data 
 
-sites.streamcat<-fread(paste0(env.dir, "/StreamCat_data_for_invert_sites.csv"))
+sites.streamcat<-fread(paste0(env.dir, "/StreamCat.MNBIO.all.csv"))
 
 head(sites.streamcat)
 nrow(sites.streamcat)

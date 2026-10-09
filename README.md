@@ -60,7 +60,11 @@ Files in the `Data/cleaned_input_data` folder represent intermediately-cleaned d
 
 ## Environmental Data
 
-Files in the `Data/environmental_data` folder include EPA StreamCat attributes (<https://www.epa.gov/national-aquatic-resource-surveys/streamcat-dataset>) attributes for all sampling locations in the dataset. EPA’s StreamCat dataset contains information for over 600 different environmental metrics linked to individual stream reaches in the NHDv2Plus dataset (Hill et al., 2015). These metrics summarize diverse geospatial attributes -- including aspects of land cover including land use, impervious surfaces and road density, soil type, point source and nutrient inputs, and climatic factors (temperature and precipitation), among others – at the catchment and watershed scale draining into each reach.
+Files in the `Data/environmental_data` folder include:
+
+- `StreamcatMNBIO.all.csv`: This file contains EPA StreamCat attributes (<https://www.epa.gov/national-aquatic-resource-surveys/streamcat-dataset>) attributes for all sampling locations in the dataset. Attributes can be matched via the `Original_ID` column. to the fish and macroinvertebrate datasets.
+
+  - EPA’s StreamCat dataset contains information for over 600 different environmental metrics linked to individual stream reaches in the NHDv2Plus dataset (Hill et al., 2015). These metrics summarize diverse geospatial attributes -- including aspects of land cover including land use, impervious surfaces and road density, soil type, point source and nutrient inputs, and climatic factors (temperature and precipitation), among others – at the catchment and watershed scale draining into each reach.
 
 # R Markdown Scripts Used for Analysis
 
