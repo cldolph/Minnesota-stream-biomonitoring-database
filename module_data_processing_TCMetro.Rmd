@@ -1,0 +1,1115 @@
+---
+title: "Biodata_processing"
+author: "Christy Dolph"
+date: "2025-01-30"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+  chunk_output_type: console
+---
+
+# Overview
+
+This script provides initial processing of biomonitoring datasets
+received from Twin Cities metro water management organizations.
+
+# Workspace Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clean up workspace and load packages (or install if necessary)
+rm(list=ls())
+
+want <- c("readxl", "writexl", "tidyverse", "zoo", 
+          "sf", "tmap", "purrr", "fs")
+          
+          need <- want[!(want %in% installed.packages()[,"Package"])]
+if (length(need)) install.packages(need)
+lapply(want, function(i) require(i, character.only=TRUE))
+rm(want, need)
+
+#Overall project directory:
+root.dir <- getwd() 
+root.dir
+
+
+```
+
+# Anoka Conservation District
+
+## Read in data
+
+List all excel files in the relevant agency folder
+
+Identify excel sheets to be excluded, because of errors with data
+collection
+
+Read in and merge all remaining excel sheets
+
+```{r}
+
+# Set the data directory to a subdirectory you want to work with (e.g., Anoka County)
+#Note ".." moves you one folder up
+#Output Data Directory for TC data:
+output.dir <- paste0(root.dir, "/Data/biodata_raw/TC_Metro/Compiled_data_clean") 
+output.dir
+
+#Raw data directory:
+raw.dir<-paste0(root.dir, "/Data/biodata_raw/TC_Metro/Raw_data/Anoka_CD/data/RAW_Data")
+raw.dir
+
+spatial.dir<-paste0(root.dir, "/Data/biodata_raw/TC_Metro/Raw_data/Anoka_CD/data/GIS")
+spatial.dir
+
+# List all Excel files in all subdirectories (including newer and older .xlsx and .xls files)
+excel_files <- list.files(raw.dir, pattern = "\\.xls[x]?$", full.names = TRUE, recursive = TRUE)
+excel_files
+
+```
+
+```{r}
+#Define search words to exclude sheets
+EXCLUSION_STRINGS <- c(
+  "low",
+  "uncertain",
+  "thrown",
+  "not preserved",
+  "technique",
+  "not sampled",
+  "reliable",
+  "incomplete",
+  "use",
+  "inadequate",
+  "decomposed",
+  "rot",
+  "poor"
+)
+
+# Create a single, case-insensitive regex pattern for efficient partial matching
+EXCLUSION_PATTERN <- paste(EXCLUSION_STRINGS, collapse = "|")
+
+
+# --- Helper Function for Single Sheet Processing ---
+#Identifies sheets that were flagged for data collection problems
+#Reads only the rows and columns that contain site, date and taxonomic data
+#Deals with difficult format of original excel sheets 
+
+process_single_sheet <- function(file, sheet, pattern) {
+  
+  # Read the sheet content: skip first 5 rows (that contain data entry instructions), and read to a maximum of 11 rows (to cover original rows 6 through 16)
+  #only original rows 6:10 contain needed taxonomic data, but rows up to 16 may include notes about the quality of the sampling effort 
+  
+  dat <- read_excel(file, sheet = sheet, skip = 5, n_max = 11, col_types = "text")
+  
+  excluded_by_string <- FALSE
+  processed_dat <- NULL
+  
+  if (nrow(dat) > 0) { #make sure sheet had data 
+    # CHECK FOR EXCLUSION STRINGS
+    all_values <- unlist(dat, use.names = FALSE)
+    found_match <- any(grepl(pattern, all_values, ignore.case = TRUE))
+    
+    if (found_match) {
+      excluded_by_string <- TRUE
+      # processed_dat remains NULL (Excluded from final_data)
+    } else {
+      # Proceed with data processing logic for sheets NOT excluded by string
+      if (nrow(dat) >= 4) {
+        # Get values from row 6 (row 1 after skipping) for first 4 columns
+        header_values <- dat[1, 1:4] |> unlist(use.names = FALSE)
+        
+        # Keep only the first 4 rows (original rows 6-9)
+        processed_dat <- dat %>% slice(1:4)
+        
+        # Replace columns 1:4 #This is to make sure all replicates have Site ID and Date
+        replaced_cols <- map2(processed_dat[, 1:4], header_values, ~ rep(.y, nrow(processed_dat)))
+        processed_dat[, 1:4] <- bind_cols(replaced_cols)
+      }
+    }
+  }
+  
+  # Return data AND the sheet's specific exclusion status
+  return(list(
+    data = processed_dat,
+    excluded_string_match = excluded_by_string
+  ))
+}
+
+
+# --- Main Function to Process All Sheets in a File ---
+read_selected_rows <- function(file) {
+  pattern <- get("EXCLUSION_PATTERN", envir = .GlobalEnv)
+  sheet_names <- excel_sheets(file)
+  
+  # Process all sheets
+  sheets_results <- map(sheet_names, ~ process_single_sheet(file, .x, pattern))
+  names(sheets_results) <- sheet_names
+  
+  # 1. Extract the processed data frames
+  sheets_data <- map(sheets_results, "data")
+  
+  # 2. Create the exclusion log for this file
+  exclusion_log <- tibble(
+    Source_File = basename(file),
+    Sheet = sheet_names,
+    Excluded_By_String = map_lgl(sheets_results, "excluded_string_match")
+  )
+  
+  return(list(
+    file_path = file,
+    sheets_data = sheets_data,
+    exclusion_log = exclusion_log
+  ))
+}
+
+
+# --- Execution and Aggregation ---
+
+# Read and process all Excel files using the functions above
+all_data_structured <- map(excel_files, read_selected_rows)
+
+# 1. AGGREGATE THE EXCLUSION LOG (detailed log showing which sheets had IDed data issues)
+full_exclusion_log_df <- all_data_structured %>%
+  map("exclusion_log") %>% # Extract the log tibble from each file result
+  list_rbind() %>%         # Combine all log tibbles into a single data frame
+  filter(Excluded_By_String == TRUE) %>% # Keep only the sheets that were excluded
+  select(Source_File, Sheet)
+
+# 2. COMBINE THE PROCESSED DATA (for the 'final_data' dataframe)
+all_data_flat <- all_data_structured %>% 
+  map2(excel_files, ., function(file, file_result) {
+    sheets <- file_result$sheets_data
+    sheet_names <- names(sheets)
+    
+    map2(sheets, sheet_names, function(data, sheet) {
+      if (is.null(data)) return(NULL) # Sheets excluded by string or skipped (short) are NULL
+      data %>%
+        mutate(across(everything(), as.character),
+               Source_File = basename(file),
+               Directory = dirname(file),
+               Sheet = sheet)
+    })
+  }) %>% flatten() %>% compact()
+
+# Combine all data frames into one if they have the same structure
+final_data <- bind_rows(all_data_flat, .id = "ID")
+
+View(final_data)
+
+# --- Check excluded sheets ---
+
+cat("\n--- List of Sheets Excluded Due to String Match (Rows 6-16) ---\n")
+if(nrow(full_exclusion_log_df) == 0) {
+  print("No sheets were excluded based on the string criteria.")
+} else {
+  print(full_exclusion_log_df)
+}
+
+#See all the excluded sheets
+full_exclusion_log_df %>% 
+print(n=nrow(.))
+
+cat("\n--- List of Excel File Names Containing At Least One Excluded Sheet ---\n")
+excluded_files_list <- unique(full_exclusion_log_df$Source_File)
+if(length(excluded_files_list) == 0) {
+  print("No files contained sheets excluded by the string criteria.")
+} else {
+  print(excluded_files_list)
+}
+```
+
+## Format and clean up data:
+
+```{r}
+#Additional formatting to fix tables
+
+names(final_data)
+
+#Identify columns you don't need:
+not.needed<-c("ID", "# individuals", "Mean # individuals per replicate", "EPT", "Family biotic index", "Number of Families", "Dominant family", "Dominant family% overall", "% comp Ephemeroptera", "% comp Plecoptera", "% compTrichoptera", "% comp Diptera", "% comp Coleoptera", "% comp Oligochaeta", "% comp Other", "Source_File", "Directory",  "squares in grid", "squares sampled", "Number of Replicates")   
+
+#note dates are in multiple formats across Excel sheets, so will have to check for those 
+
+
+
+final_data_formatted <- final_data %>%
+  # format date column
+  rename(Date = "Sampling Date") %>%
+  
+  # *** CHECK FOR MULTIPLE DATE FORMATS ***
+  mutate(
+    # 1. Clean up known problematic date strings BEFORE conversion
+    Date_Cleaned = str_replace(Date, "31 May 2011 and 6 June 2011", "2011-06-06"),
+    
+    # Now use the cleaned column for conversion
+    # 2. Try to convert as Excel Serial Number
+    Collection_Date_Numeric = suppressWarnings(as.Date(as.numeric(Date_Cleaned), origin = "1899-12-30")),
+    
+    # 3. Try to convert as Day-Month-Year (robust for "12 Oct. 2011")
+    Collection_Date_DMY = suppressWarnings(lubridate::dmy(Date_Cleaned)),
+    
+    # 4. Try to convert as Month-Day-Year (for other text formats)
+    Collection_Date_MDY = suppressWarnings(lubridate::mdy(Date_Cleaned)),
+    
+    # 5. Combine and prioritize: Use Numeric, then DMY, then MDY
+    Collection_Date = coalesce(
+      Collection_Date_Numeric,
+      Collection_Date_DMY,
+      Collection_Date_MDY
+    )
+  ) %>%
+  # Remove temporary date columns
+  select(-Date_Cleaned, -Collection_Date_Numeric, -Collection_Date_DMY, -Collection_Date_MDY) %>% 
+  # *** END DATE LOGIC ***
+  
+  # remove rows where no invert IDs were collected (ie, where no replicates were collected)
+  # NOTE: Be careful with the positional indices (10:95 etc); it's fragile
+  filter(!if_all(c(10:97, 117:159, 162:178), is.na)) %>%
+  # fill in Site, Collection_Date and other information for blank rows:
+  mutate(across(c(`Site Name`, Collection_Date, `Who conducted sampling?`), zoo::na.locf)) %>%
+  
+  # remove unneed columns, including the "Families --->" header column
+  dplyr::select(!`Families  --->`) %>% 
+  dplyr::select(!all_of(not.needed)) %>%
+  # change family counts to long form
+  pivot_longer(
+    cols = -c(`Site Name`, Date, Collection_Date, # <-- Included the new date column
+             `Who conducted sampling?`, `Replicate Number`, `Squares in grid`,
+             `Squares Sampled`, `Q/A performed?`, Id_Comments),
+    names_to = "Family",
+    values_to = "count"
+  ) %>%
+  rename(
+    SiteID = `Site Name`,
+    Data_collectors = `Who conducted sampling?`
+  ) %>% 
+  mutate(Agency="Anoka Conservation District")
+
+View(final_data_formatted)
+
+```
+
+## Check years and sites for which data is available
+
+```{r}
+View(final_data_formatted %>% 
+  group_by(SiteID) %>% 
+  summarise(min.date=min(Collection_Date), max.date=max(Collection_Date)))
+
+
+#Note discrepancies in Site Names! (Site Names entered slightly differently in some years). Some of the discrepancies are quite confusing (eg, two different Hardwood Creek locations on Hwy 140 vs Co Rd 140)
+
+View(final_data_formatted %>% 
+  filter(Collection_Date==as.Date("2010-10-29")))
+
+```
+
+## Load in spatial data (lat/longs) for sampled sites
+
+```{r}
+#load in site locations:  
+
+locations<-st_read(file.path(spatial.dir, "ACD_Biomonitoring_All_Years.shp")) 
+
+```
+
+Plot site locations:
+
+```{r}
+
+tm_shape(locations) +    
+  tm_dots()+   
+  tm_text("SITEID", size=0.5)  
+
+#Note near duplicate locations for some sites (eg, RumRiver_Hwy24)
+```
+
+Clean up and look at SiteIDs in spatial data:
+
+```{r}
+#Remove duplicate locations 
+nrow(locations)  
+
+locations.clean<-locations %>%    
+  distinct(SITEID, .keep_all=TRUE)  
+
+nrow(locations.clean) #check # of rows remaining  
+
+```
+
+## Resolve site name discrepancies:
+
+Site name discrepancies are resolved below. Inconsistent SiteIDs are
+replaced with SiteIDs used in GIS data from Anoka Conservation District.
+
+Some additional notes on names that are unresolved. For now (as of
+2.17.25) I am dropping these sites if we can't resolve their ID.
+
+- Clearwater Creek at Centennial High School and Clearwater Creek -
+  these do not have an associated lat/long in GIS file. There is only 1
+  Clearwater site in GIS file - assume this is all the same site.
+
+- Rum River at Rum Central - no lat/long in GIS file (is this the same
+  as RumRiver_RumRParkN?
+
+- Hardwood Creek Site IDs are very unclear - need verification from
+  Anoka Conservation District. The precise locations of the following
+  SiteIDs are unknown:
+
+  - Hardwood Cr at FL AL C
+
+  - Hardwood Cr
+
+  - Hardwood Creek at Hwy 140 (unclear if this is the Le Roux property
+    or the second Hwy 140 location)
+
+  - Hardwood Cr at Hwy 140 ( Le Roux Property) - Hwy 140 and Le Roux
+    property are 2 separate locations
+
+```{r}
+#Make site names consistent across years (using siteID from spatial data)
+
+#look at site names: 
+sort(locations.clean$SITEID)
+
+
+#Replace specific Site name versions with a consistent name
+correct_name <- "RumRiver_Hwy116"
+wrong.names.RumSouth <- c(
+  "Rum River South", 
+  "Rum River South  at Anoka High School", 
+  "Rum River South  at Anoka High School", 
+  "Rum River South  at Anoka High School ( Rum River at Hwy 116)", 
+  "Rum River South at Anoka High School", 
+  "Rum River at Anoka High School", 
+  "Rum River at Anoka High School_ Weber",
+  "Rum River S. of Co Rd. 116 bridge",
+  "Rum River at Hwy 116",
+  "Rum South  at Anoka High School",
+  "Rum River Hwy 116",
+  "Rum R south of C R 116 bridge ( at Anoka High School)",
+  "Anoka High School Rum River South",
+  "Anoka High School Rum River",
+  "Rum River" #note: verified in original spreadsheet that this was Rum River South
+)
+
+correct_name_RumNorth<-"RumRiver_Hwy24"
+wrong.names.RumNorth<-c("Rum River North", 
+                        "Rum River North Canoe Landing",
+                        "Rum River North at Hwy 24 (park canoe landing)",
+                        "Rum River at Co Rd 24, St. Francis",
+                        "Rum River at Hwy 24",
+                        "Rum River at Hwy 24 1", 
+                        "Rum River at Hwy 24 (canoe landing at Rum North Co Park)")
+
+correct_name_Rice<-"RiceCreek_Hwy65" 
+wrong.names.Rice<-c("Rice Cr", "Rice Cr at Hwy 65", "Rice Cr at Hwy 65 ( Locke Park)")
+
+correct_name_Pleasure<-"PleasureCreek_86thAve"
+wrong.names.Pleasure<-c("Pleasure Cr 86th", "Pleasure Cr at 86th Ave N W", "Pleasure Cr at 86th Ave")
+
+correct_name_Hardwood.LeRoux<-"HardwoodCreek_LaRouxProperty"
+wrong.names.Hardwood.LeRoux<-c("Hardwood Cr at Hwy 140 ( Le Roux Property)",
+                        "Hardwood Cr at La Roux Property")
+
+#NOTE: These Hardwood Creek Site IDs are very unclear - need verification from Anoka Conservation District 
+
+#correct_name_HardwoodALC<-"Hardwood Cr at Forest Lake ALC"
+#wrong.names.HardwoodALC<-c("Hardwood Cr at FL AL C", "	
+#Hardwood Cr")
+
+
+correct_name_CoonCrEgret<-"CoonCreek_EgretBlvd"	
+wrong.names.Coon.Egret<-c("Coon Cr at Erlandson Park",
+"Coon Creet at Egret St", "Coon Cr at Egret Blvd in Erlandson Park")
+
+correct_name_CoonLions<-"CoonCreek_LionsCoonCreekPark"
+wrong.names.Coon.Lions<-c("Coon Cr at Hanson Blvd in Lions Park", "Coon Cr at Lions Coon Cr Park, Coon Rapids")
+
+correct_name_CoonCrosstown<-"CoonCreek_CrosstownBlvd"
+wrong.names.Coon.Crosstown<-c("Coon Cr at Crosstown Blvd", "Coon Cr at Andover High School ( Hanson Blvd)", "Coon Cr at Andover High School", "Coon Cr", "Coon Cr at Crosstown Blvd ( at Andover High School)") #Assuming Coon Cr is also at the High School because title of the excel file says "Andover H.S."
+
+#Clean up data: 
+
+final_data_cleaner<-final_data_formatted %>% 
+  mutate(across(SiteID, \(x) str_replace(x, '@', 'at'))) %>% 
+  mutate(across(SiteID, \(x) str_replace(x, 'Creek', 'Cr'))) %>% 
+  mutate(across(SiteID, \(x) str_replace(x, 'HS', 'High School'))) %>% 
+  mutate(across(SiteID, \(x) str_replace(x, '_', 'at'))) %>% 
+  mutate(across(SiteID, \(x) str_replace(x, 'behind', 'at'))) %>%
+#add space before capital letters:
+  mutate(SiteID=gsub("([^ ])([A-Z])", "\\1 \\2", SiteID)) %>% 
+  #add space before and after "at" if not there:
+#mutate(SiteID=gsub("\\s*at\\s*", " at ", SiteID)) %>% 
+  mutate(SiteID=gsub("(?<!\\S)(at)(?!\\S)(?!er)|(?<!\\s)(at)(?!er)", " at ", SiteID, perl = TRUE)) %>% 
+#capitalize "Hwy" if it's not: 
+  mutate(SiteID=gsub("hwy", "Hwy", SiteID, ignore.case = FALSE)) %>% 
+#add space before and after Hwy of not there
+mutate(SiteID=gsub("\\s*Hwy\\s*", " Hwy ", SiteID)) %>% 
+#remove dashes
+mutate(SiteID=gsub("-", "", SiteID)) %>% 
+#unabbreviate A for Anoka:
+mutate(SiteID=gsub("A ", "Anoka ", SiteID, ignore.case=FALSE)) %>% 
+#replace "behind" with "at"
+mutate(SiteID=gsub("Behind", "at", SiteID, ignore.case=TRUE)) %>% 
+#replace "Cr." with "Cr"
+mutate(SiteID=gsub("Cr. ", "Cr ", SiteID)) %>% 
+#remove double spaces
+mutate(SiteID=gsub("  ", " ", SiteID)) %>% 
+#fix site names:
+
+  mutate(SiteID = if_else(SiteID %in% wrong.names.RumSouth, correct_name, SiteID)) %>% 
+  
+  mutate(SiteID= if_else(SiteID %in% wrong.names.RumNorth, correct_name_RumNorth, SiteID)) %>% 
+  
+  mutate(SiteID = ifelse(SiteID %in% wrong.names.Rice, correct_name_Rice, SiteID)) %>% 
+  
+  mutate(SiteID = ifelse(SiteID %in% wrong.names.Pleasure, correct_name_Pleasure, SiteID)) %>% 
+
+  mutate(SiteID = ifelse(SiteID %in% wrong.names.Hardwood.LeRoux, correct_name_Hardwood.LeRoux, SiteID)) %>% 
+  
+  mutate(SiteID = ifelse(SiteID %in% wrong.names.Coon.Egret, correct_name_CoonCrEgret, SiteID)) %>% 
+
+  mutate(SiteID = ifelse(SiteID %in% wrong.names.Coon.Lions, correct_name_CoonLions, SiteID)) %>%    
+
+  mutate(SiteID = ifelse(SiteID %in% wrong.names.Coon.Crosstown, correct_name_CoonCrosstown, SiteID)) %>% 
+
+  mutate(SiteID = ifelse(SiteID %in% c("Clearwater Cr at Centerville City Hall","Clearwater Cr at Centennial High School", "Clearwater Cr"), "ClearwaterCreek_CentervilleCityH", SiteID)) %>% 
+  
+  mutate(SiteID= ifelse(SiteID == "Hardwood Cr at 165th St. N & 24th Ave N ( Carlson Property)", "HardwoodCreek_165thSt", SiteID)) %>% 
+  
+  mutate(SiteID = ifelse(SiteID == "Cedar Cr at Hwy 22", "CedarCreek_Hwy22", SiteID)) %>% 
+  
+  mutate(SiteID = ifelse(SiteID == "Cedar Cr at Hwy 9", "CedarCreek_Hwy9", SiteID)) %>% 
+  
+  mutate(SiteID = ifelse(SiteID == "Ford Brook at Hwy 63", "FordBrook_Hwy63", SiteID)) %>% 
+  
+  #mutate(SiteID = ifelse(SiteID == "Ditch 6 at Valley #Drive, Andover", )) #No apparent lat/long
+
+  mutate(SiteID = ifelse(SiteID == "Sand Cr at Xeon St. N W", "SandCreek_LionsCoonCreekPark", SiteID)) %>% 
+          
+  mutate(SiteID = ifelse(SiteID == "Sand Cr at Xeon St. N W", "SeelyeBrook_Hwy7", SiteID)) %>% 
+  
+  mutate(SiteID = ifelse(SiteID == "Trott Brook at Hwy 5", "TrottBr_Hwy5", SiteID)) %>% 
+  
+  mutate(SiteID = ifelse(SiteID == "Seelye Brook at Hwy 7", "SeelyeBrook_Hwy7", SiteID))
+  
+   
+#Check cleaner data: 
+View(final_data_cleaner %>% 
+  group_by(SiteID) %>% 
+  summarise(min.date=min(Collection_Date), max.date=max(Collection_Date)))
+
+```
+
+**Merge sites to lat/long location.**
+
+Note: this will drop sites for which no site location match was readily
+apparent.
+
+```{r}
+
+Site.loc<-merge(locations.clean %>% rename(SiteID=SITEID),
+                final_data_cleaner, by=c("SiteID"))
+#View(Site.loc)
+
+
+#Check sites retained
+View(Site.loc %>% 
+  group_by(SiteID) %>% 
+  summarise(min.date=min(Collection_Date), max.date=max(Collection_Date)))
+
+```
+
+## Final columns needed for compiled data sheet:
+
+Create columns that match format for all compiled data. And write final
+table to file.
+
+```{r}
+names(Site.loc)
+
+Data.For.File<-Site.loc %>% 
+  st_drop_geometry() %>%  #drop shapefile format
+  mutate(Original_ID=SiteID) %>% 
+  mutate(ID="") %>% #blank unique ID column
+  mutate(Year=format(Collection_Date, "%Y")) %>%  
+  rename(Replicate="Replicate Number") %>% 
+  rename(Collected_By="Data_collectors") %>% 
+  mutate(Original_Taxon=Family) %>% 
+  mutate(Class="") %>% 
+  mutate(Subclass="") %>% 
+  mutate(Order="") %>% 
+  mutate(Family="") %>% 
+  mutate(Genus="") %>% 
+  mutate(Species="") %>% 
+  rename(Number=count) %>% 
+  mutate(Notes="Id_Comments") %>%
+  mutate(Season="") %>% 
+  dplyr::select(Original_ID, ID, Collection_Date, Season, Year, Replicate, Agency, Collected_By, Class, Subclass, Order, Family, Genus, Species, Original_Taxon, Number, Notes, Latitude, Longitude)
+
+View(Data.For.File)
+
+
+
+```
+
+## Remove duplicates
+
+Note there is a duplicate sheet for Coon Creek in 2015 - same data
+listed in fall and spring, same issue with Rice Creek in 2021; delete
+one set of duplicates
+
+```{r}
+
+View(Data.For.File %>% janitor::get_dupes() %>% filter(!is.na(Number)))
+
+nrow(Data.For.File)
+
+Data.For.File<-Data.For.File %>% distinct()
+
+nrow(Data.For.File)
+
+#2021 duplicates -  
+
+View(Data.For.File %>% filter(Collection_Date=="2021-10-12"))
+
+View(Data.For.File %>% filter(Collected_By=="Totino Grace HS; ID check by BK")) #The only site/date with this "Collected_By" - a duplicate of the original set - drop from data
+
+Data.For.File<-Data.For.File %>% filter(!Collected_By=="Totino Grace HS; ID check by BK")
+
+nrow(Data.For.File)
+```
+
+## Write clean data to file
+
+```{r}
+#Write cleaned Anoka data to file:
+
+write_xlsx(Data.For.File, file.path(output.dir, "final_data_compiled_anoka.xlsx"))
+```
+
+# Bassett Creek Watershed District
+
+Each Bassett Creek file contains multiple sheets with a mix of tidy and
+untidy formats over the years. The following script addresses these
+idiosyncracies by site (8 sites total)
+
+Google Gemini was used to assist in code development for this section
+(tho verbatim Google Gemini suggestions were not used; they were
+adapted)
+
+## Read in all excel sheets for all sheets:
+
+```{r}
+
+#Set directory for Bassett Creek data
+bassett.dir<-paste0(root.dir, "/Data/biodata_raw/TC_Metro/Raw_data/Bassett_Creek/Data")
+bassett.dir
+
+#See all excel files
+list.files(bassett.dir)
+
+#Create list of all excel files only in this folder
+bass_excel_files <- list.files(bassett.dir, pattern = "\\.xls[x]?$", full.names = TRUE, recursive = FALSE)
+bass_excel_files
+
+
+#Create a function to read all sheets from al files into a list
+
+read_all_sheets <- function(file_path) {
+  sheet_names <- excel_sheets(file_path)
+  
+  # Read each sheet into a list of data frames
+  sheets_data <- map(sheet_names, ~read_excel(file_path, sheet = .x))
+  
+  # Optionally, name the list elements with the sheet names
+  names(sheets_data) <- sheet_names
+  
+  return(sheets_data)
+}
+
+all_excel_data <- map(bass_excel_files, read_all_sheets)
+
+# Optionally, name the outer list with the file names
+names(all_excel_data) <- basename(bass_excel_files)
+  
+all_excel_data
+
+```
+
+Process data separately by Site
+
+Sweeney Branch
+
+```{r}
+# Define the list of all macroinvertebrate data files for this site
+invertebrate_files <- c(
+    SweeneyBranch.xlsx$`2020 Invertebrate Data-MPCA`,
+    "SweeneyBranch.xlsx - 2015 BCWMC Invertebrate Data.csv",
+    "SweeneyBranch.xlsx - 2012.csv",
+    "SweeneyBranch.xlsx - 2009.csv",
+    "SweeneyBranch.xlsx - 2006.csv",
+    "SweeneyBranch.xlsx - 2003.csv",
+    "SweeneyBranch.xlsx - 2000.csv",
+    "SweeneyBranch.xlsx - 1996.csv"
+)
+
+# --- 1. Function to process the 2020 MPCA file (Tidy Format) ---
+# This file is relatively clean and has standard headers.
+process_2020_data <- function(file_path) {
+    read_csv(file_path) %>%
+        # Select and rename required columns
+        select(
+            SiteID = FieldNum,
+            TaxonName = Name1,
+            TaxonName2 = Name2,
+            Count = `Transformed Count`,
+            Date = DateEntered
+        ) %>%
+        # Combine the two taxonomic name columns
+        mutate(
+            TaxonomicID = if_else(
+                is.na(TaxonName2) | TaxonName2 == "",
+                TaxonName,
+                paste(TaxonName, TaxonName2)
+            ),
+            # Standardize Site ID (20UM011 corresponds to Sweeney Branch)
+            SiteID = "Sweeney Branch (MPCA 2020)"
+        ) %>%
+        # Select final columns and convert Date to standard format
+        select(SiteID, TaxonomicID, Count, Date) %>%
+        mutate(Date = ymd(Date))
+}
+
+# --- 2. Function to process the 2015 BCWMC file (Tidy Format) ---
+# This file is also relatively clean with different headers.
+process_2015_data <- function(file_path) {
+    read_csv(file_path) %>%
+        # Select and rename required columns
+        select(
+            SiteID = Sample_Station_Name,
+            TaxonomicID = Taxon,
+            Count = Subsample, # Using Subsample as the primary count
+            Date = Sample_Date_Collected
+        ) %>%
+        # Select final columns and convert Date to standard format
+        select(SiteID, TaxonomicID, Count, Date) %>%
+        mutate(Date = mdy(Date)) # Assuming MM/DD/YYYY or similar for 2015
+}
+
+# --- 3. Function to process Hierarchical/Untidy files (1996-2012) ---
+# These files have header information embedded in the first few rows,
+# and the taxonomy is listed hierarchically in the first column, with counts
+# in the rightmost column.
+process_hierarchical_data <- function(file_path) {
+    # 1. Read header info to extract Date and SiteID
+    header_lines <- readLines(file_path, n = 5, warn = FALSE)
+
+    # SiteID is consistently "Sweeney Lake Branch at Turner's Crossroad" or similar
+    site_id <- "Sweeney Branch at Turner's Crossroad"
+
+    # Extract date - look for a date pattern in the first few lines
+    date_match <- str_extract(header_lines, "\\d{4}-\\d{2}-\\d{2}|\\d{1,2} [A-Za-z]{3}\\. \\d{4}|\\d{1,2}/\\d{1,2}/\\d{2,4}")
+    date_match <- date_match[!is.na(date_match)]
+    
+    # Use the first valid date found, or default if none found
+    if (length(date_match) > 0) {
+        # Clean up date formats and convert
+        date_extracted <- date_match[1] %>% 
+          str_replace_all("\\.", "") %>% 
+          mdy_or_y(.)
+    } else {
+        # Extract year from filename as a fallback (e.g., "2000")
+        year_extracted <- str_extract(file_path, "\\d{4}")
+        date_extracted <- paste0(year_extracted, "-10-01") %>% ymd()
+    }
+
+    # 2. Read the main data body, skipping initial rows and ignoring headers
+    # We skip 8 rows to start at the Taxa/Count data for most files (e.g. 2012)
+    data_raw <- read_csv(
+        file_path,
+        skip = 8,
+        col_names = FALSE,
+        col_types = cols(.default = col_character()),
+        show_col_types = FALSE
+    )
+
+    # 3. Clean and process the data frame
+    data_clean <- data_raw %>%
+        # The taxon name is always in the first column (X1)
+        # The count is always in the last column that contains numeric data
+        select(
+            TaxonomicID = 1,
+            Count = last_col() # Select the last column as the count
+        ) %>%
+        # Convert Count to numeric and remove non-numeric entries (headers, NAs)
+        mutate(
+            Count = as.numeric(Count),
+            TaxonomicID = str_trim(TaxonomicID) # Remove leading/trailing spaces
+        ) %>%
+        # Filter for rows that have a valid count (macroinvertebrate records)
+        filter(!is.na(Count) & Count > 0) %>%
+        # Add the extracted SiteID and Date
+        mutate(
+            SiteID = site_id,
+            Date = date_extracted
+        ) %>%
+        # Select final columns and ensure order
+        select(SiteID, TaxonomicID, Count, Date)
+    
+    return(data_clean)
+}
+
+# --- 4. Main consolidation script ---
+
+# Initialize a list to hold the processed data frames
+all_data_list <- list()
+
+# Loop through all files and apply the appropriate function
+for (file in invertebrate_files) {
+    print(paste("Processing:", file))
+
+    if (str_detect(file, "2020")) {
+        # Apply 2020-specific function
+        df <- process_2020_data(file)
+    } else if (str_detect(file, "2015")) {
+        # Apply 2015-specific function
+        df <- process_2015_data(file)
+    } else {
+        # Apply the complex hierarchical function (1996 - 2012)
+        df <- process_hierarchical_data(file)
+    }
+
+    # Add the result to the list
+    all_data_list[[file]] <- df
+}
+
+# Combine all data frames into a single, comprehensive table
+compiled_invertebrate_data <- bind_rows(all_data_list)
+
+# --- 5. Output and final clean up ---
+
+# Export the final compiled data to a new CSV file
+# This will be in the same folder as your input files.
+write_csv(compiled_invertebrate_data, "compiled_macroinvertebrate_data.csv")
+
+print("--- Data Compilation Complete! ---")
+print(paste("Total Records Compiled:", nrow(compiled_invertebrate_data)))
+print("Output file saved as: compiled_macroinvertebrate_data.csv")
+print("First few rows of the compiled data:")
+print(head(compiled_invertebrate_data))
+
+# Also print a summary of how many records were found per year
+print("Records per year:")
+compiled_invertebrate_data %>%
+    mutate(Year = year(Date)) %>%
+    group_by(Year) %>%
+    summarise(TotalRecords = n())
+```
+
+# Dakota County
+
+## Read in all files
+
+Columns are the same for every year
+
+```{r}
+
+#read in all Dakota files
+
+#Set directory for Dakota data
+dakota.dir<-paste0(root.dir, "/Data/biodata_raw/TC_Metro/Raw_data/Dakota County Soil and Water/Raw_Data")
+dakota.dir
+
+#See all excel files
+list.files(dakota.dir)
+
+#Create list of all excel files only in this folder
+dakota_excel_files <- list.files(dakota.dir, pattern = "\\.xls[x]?$", full.names = TRUE, recursive = FALSE)
+dakota_excel_files
+
+
+#Read in all excel files
+
+all_data <- dakota_excel_files %>% 
+  set_names(basename(.)) %>% 
+  map_df(read_excel, .id = "source_file")
+
+head(all_data)
+
+```
+
+## Read in coordinates for site locations and merge to data
+
+Note that coordinates were not provided for all sampling locations, in
+particular the "DUP" locations, and A16-A25
+
+```{r}
+
+coor.dir<-paste0(root.dir, "/Data/biodata_raw/TC_Metro/Raw_data/Dakota County Soil and Water/Coordinates")
+
+list.files(coor.dir)
+
+dakota.loc<-read_excel(paste0(coor.dir, "/Dakota_Coordinates.xlsx"))
+
+head(dakota.loc)
+names(dakota.loc)
+
+#Check site names
+levels(factor(dakota.loc$Site))
+levels(factor(all_data$Sample_Client_ID))
+
+#Site naming discrepancies - 
+#Assuming "A01" is the same as "A1" etc
+
+#Rename site locations for consistency (removing 0s for single digit numbers)
+
+all_data<-all_data %>%
+  dplyr::rename(Site=Sample_Client_ID) %>% 
+  mutate(Site=str_replace(Site, "A0(?=\\d)", "A"))
+
+levels(factor(all_data$Site))
+
+#Merge with coordinates
+#Use downstream coordinates (end of sampling reach)
+
+all_data_coord<-merge(all_data, dakota.loc, by=c("Site"))
+nrow(all_data_coord)
+
+nrow(all_data) #lost about 300 rows 
+
+#Format names to match other datasets
+names(all_data_coord)
+
+View(all_data_coord)
+
+all_data_coord<-all_data_coord %>% 
+  dplyr::rename(Collection_Date=Sample_Date_Collected, Latitude=Down_Latitude, Longitude=Down_Longitude, Original_ID=Site, Number=Subsample, Original_Taxon=Taxon) %>% 
+  mutate(Agency="Dakota County SWCD") %>% 
+  mutate(Year=year(as.Date(Collection_Date, format="%Y-%m-%d")))
+
+#List of target columns for procecssed data
+target_cols<-c("Original_ID",	"Collection_Date", "Season",	"Year",	"Replicate",	"Agency",	"Collected_by",	"Class", "Subclass", "Order", "Family",	"Genus", "Species", "Original_Taxon",	"Number",	"Notes", "TSN",	"Site", "Latitude", "Longitude", "Northing", "Easting")
+
+
+
+
+```
+
+## Write data to File
+
+```{r}
+
+write_xlsx(all_data_coord, paste0(output.dir, "/final_data_compiled_dakota_4_8_26_cleaned.xlsx"))
+
+```
+
+# Metropolitan Council (MCES)
+
+Only including data sampled from wadeable streams in 2022 and 2023 using
+MPCA SOP, as all other MCES data is for rivers collected using alternate
+methods (Hester-Dendy and Ponar Dredge)
+
+## Read in data
+
+```{r}
+
+
+#Set directory for MCES data
+mces.dir<-paste0(root.dir, "/Data/biodata_raw/TC_Metro/Raw_data/MCES/Macroinvertebrates")
+mces.dir
+
+#See all excel files
+list.files(mces.dir)
+
+#Create list of wadeable streams files
+
+mces_files<-dir_ls(mces.dir, regexp = "Streams")
+mces_files
+
+#Read in stream excel files
+
+mces_data <- mces_files %>% 
+  set_names(basename(.)) %>% 
+  map_df(read_excel, .id = "source_file")
+
+head(mces_data)
+View(mces_data)
+```
+
+## Read in coordinates and merge to data
+
+```{r}
+
+#Set directory 
+mces.coor.dir<-paste0(root.dir, "/Data/biodata_raw/TC_Metro/Raw_data/MCES/Coordinates")
+
+list.files(mces.coor.dir)
+
+mces.coor<-read_excel(paste0(mces.coor.dir, "/MCES biomonitoring stream station metadata_UMNrequest.xlsx"))
+
+head(mces.coor)
+#View(mces.coor)
+
+#Site names
+levels(factor(mces.coor$Station_number))
+
+levels(factor(mces_data$Sample_Client_ID))
+
+#Make names match
+#remove leading zeroes from Station Number
+mces.coor<-mces.coor %>% 
+  mutate(Site = str_remove(Station_number, "00"))
+
+#remove space and decimal from Sample Client ID
+mces_data<-mces_data %>% 
+  mutate(Site=str_remove(Sample_Client_ID, " ")) %>% 
+  mutate(Site=str_remove(Site, "\\."))
+  
+#couple of other IDs to fix manually:
+
+mces.coor<-mces.coor %>% 
+  mutate(Site=ifelse(Site=="CW0231", "CW231", Site)) %>% 
+  mutate(Site=ifelse(Site=="MH17", "MHC17", Site))
+
+levels(factor(mces.coor$Site))
+levels(factor(mces_data$Site))
+
+mces.data.coord<-merge(mces_data, mces.coor, by=c("Site"))
+nrow(mces.data.coord)
+
+nrow(mces_data) #lost about 30 rows --> these were empty rows with no data, so it's OK. 
+
+```
+
+## Format column headings
+
+```{r}
+
+names(mces.data.coord)
+
+View(head(mces.data.coord))
+
+mces.data.coord<-mces.data.coord %>% 
+  rename(Original_ID=Site, Collection_Date=Sample_Date_Collected, Original_Taxon=Taxon, Number=Subsample) %>% 
+  mutate(Year=year(as.Date(Collection_Date, format="%Y-%m-%d"))) %>% 
+  mutate(Agency="Metropolitan Council")
+
+#List of target columns for procecssed data
+target_cols<-c("Original_ID",	"Collection_Date", "Season",	"Year",	"Replicate",	"Agency",	"Collected_by",	"Class", "Subclass", "Order", "Family",	"Genus", "Species", "Original_Taxon",	"Number",	"Notes", "TSN",	"Site", "Latitude", "Longitude", "Northing", "Easting")
+```
+
+## Write data to file
+
+```{r}
+
+write_xlsx(mces.data.coord, paste0(output.dir, "/final_data_compiled_MCES_4_8_26_cleaned.xlsx"))
+
+```
+
+# Riley Purgatory
+
+Original dataset processing notes:
+
+-There is a coordinates tab, but it lacks coordinates for all sites, so
+am using the coordinates listed in the stream_macro tab. Both "middle"
+and "upstream" locations are listed. I assume these coordinates
+correspond to the upstream start and middle locations of the sampled
+reach. i will use "middle" locations for all sites.
+
+-Only one P6 row had coordinates, assumed this was the coordinates for
+all P6 samples
+
+-lat/long for some sites was reversed, so i fixed them
+
+-I made a 'clean' site coordinates file, by selecting coordinates from
+the stream_macroinvertebrates tab and filtering them to unique values:
+"site_locations_cld_4_9_26.xlsx"
+
+-one collection was done over 2 days: 10/10/2005-10/18/2005; i will
+assign later date as the date
+
+## Macroinvertebrates
+
+```{r}
+
+
+#Set directory 
+riley.dir<-paste0(root.dir, "/Data/biodata_raw/TC_Metro/Raw_data/Riley Purgatory")
+
+list.files(riley.dir)
+
+#Read in biodata:
+
+riley.bugs<-read_excel(paste0(riley.dir, "/stream macroinvertebrates and fish database_cldedited_4_9_26.xlsx"), sheet='stream_macro')
+
+
+head(riley.bugs)
+names(riley.bugs)
+
+#Load site locations: 
+
+riley.coor<-read_excel(paste0(riley.dir, "/site_locations_cld_4_9_26.xlsx"))
+head(riley.coor)
+
+#Merge biodata to lat/long
+
+#First check if site names match
+levels(factor(riley.bugs$site))
+levels(factor(riley.coor$site))
+
+riley.bugs.coor<-merge(riley.bugs, riley.coor %>% dplyr::select(site, Latitude, Longitude), by=c("site"))
+nrow(riley.bugs.coor)
+
+nrow(riley.bugs) #No rows lost in merge
+
+
+#Select and format needed columns
+target_cols
+
+names(riley.bugs.coor)
+View(riley.bugs.coor)
+
+
+riley.bugs.coor<-riley.bugs.coor %>% 
+  rename(Original_ID=site, Collection_Date=date, Original_Taxon=species) %>% 
+  mutate(Agency="Riley-Purgatory")
+
+#Write to file
+write_xlsx(riley.bugs.coor, paste0(output.dir, "/final_data_compiled_riley_purgatory_4_9_26_cleaned.xlsx"))
+```
+
+## Fish data
+
+Note: not all fish data has date collected, but it does have year
+
+```{r}
+
+riley.fish<-read_excel(paste0(riley.dir, "/stream macroinvertebrates and fish database_cldedited_4_9_26.xlsx"), sheet='stream_fish')
+
+
+levels(factor(riley.fish$Site))
+
+riley.fish.coor<-merge(riley.fish %>% rename(site=Site), riley.coor %>% dplyr::select(site, Latitude, Longitude), by=c("site"))
+nrow(riley.fish.coor) 
+
+nrow(riley.fish) #lost ~45 rows 
+
+names(riley.fish.coor)
+
+#format columns
+target_cols
+
+riley.fish.coor$Collection_Date <- make_date(year = riley.fish.coor$Year, month = riley.fish.coor$Month, day = riley.fish.coor$Day)
+
+riley.fish.coor<-riley.fish.coor %>% 
+  rename(Original_ID=site, Original_Taxon=`common name`) %>% 
+  mutate(agency="Riley-Purgatory")
+
+
+#Write to file
+write_xlsx(riley.fish.coor, paste0(output.dir, "/Fish_data_cleaned/FISH_final_data_compiled_riley_purgatory_4_9_26_cleaned.xlsx"))
+```
