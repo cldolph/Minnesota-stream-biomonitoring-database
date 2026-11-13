@@ -2,7 +2,7 @@
 
 Author: Christy Dolph
 
-Updated: October 9, 2026
+Updated: November 13, 2026
 
 Contact: dolph008\@umn.edu
 
@@ -38,11 +38,11 @@ Macroinvertebrate data was compiled from multiple sources, and received consider
 
 All of the fully processed macroinvertebrate data files are in the folder `Data/processed_taxonomic_datasets` (See below). This folder contains 3 separate files:
 
-1)  `Genus_relative_abundance_rarified.xlsx` - contains information for all genus-level IDs in the dataset; specimens without at least a genus-level ID are omitted.
+1)  `Genus_relative_abundance_rarified_SiteClean.xlsx` - contains information for all genus-level IDs in the dataset; specimens without at least a genus-level ID are omitted.
 
-2)  `Family_relative_abundance_rarified.xlsx` - contains information for all family-level IDs in the dataset; specimens without at least a family-level ID are omitted.
+2)  `Family_relative_abundance_rarified_SiteClean.xlsx` - contains information for all family-level IDs in the dataset; specimens without at least a family-level ID are omitted.
 
-3)  `MixedID_relative_abundance_rarified.csv` - contains information about all IDs in the dataset; no specimens are omitted, but note that this dataset contains "mixed" IDs (where specimens may be identified at various taxonomic resolutions; e.g., specimens IDed at a family level at one site may be identified at a genus level at another site.
+3)  `MixedID_relative_abundance_rarified_SiteClean.csv` - contains information about all IDs in the dataset; no specimens are omitted, but note that this dataset contains "mixed" IDs (where specimens may be identified at various taxonomic resolutions; e.g., specimens IDed at a family level at one site may be identified at a genus level at another site.
 
 For each of these datasets, specimens at each site are rarified to 300 individuals maximum (i.e., specimens are randomly selected from the original count to a maximum of 300 individuals).
 
@@ -52,7 +52,7 @@ Taxonomic units were derived in the R Markdown file: `module_OTUs.Rmd` if you wa
 
 ## Fish data
 
-The processed fish data is located in the `Data/processed_taxonomic_datasets` folder in the file `Fish_relative_abundance.xlsx` .
+The processed fish data is located in the `Data/processed_taxonomic_datasets` folder in the file `Fish_relative_abundance_SiteClean.xlsx` .
 
 ## Input Data
 
@@ -62,7 +62,7 @@ Files in the `Data/cleaned_input_data` folder represent intermediately-cleaned d
 
 Files in the `Data/environmental_data` folder include:
 
-- `Stations.xlsx`: Locations for all unique biological monitoring sampling sites.
+- `Stations_clean_comid.xlsx`: Locations for all unique biological monitoring sampling sites.
 
 - `StreamcatMNBIO.all.csv`: This file contains EPA StreamCat attributes (<https://www.epa.gov/national-aquatic-resource-surveys/streamcat-dataset>) attributes for all sampling locations in the dataset. Attributes can be matched via the `Original_ID` column. to the fish and macroinvertebrate datasets.
 
@@ -77,6 +77,8 @@ This repository contains the following R Markdown scripts:
 - `module_fish_OTUS.Rmd` - used to clean and process fish data compiled from all sources; the resulting output is in `Data/processed_taxonomic_datasets`
 
 - `module_environmental_variables.Rmd` - used to compile geospatial attributes for biomonitoring locations
+
+Note that scripts used to clean and process the original raw biological monitoring data, as well as the raw data files themselves, are not included in this repository, but are available on request.
 
 # Citations
 
