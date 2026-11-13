@@ -65,7 +65,7 @@ dir.create(file.path(root.dir, "/Data/GIS"))
 dir.create(file.path(root.dir, "/Data/Figures_Tables"))
 ```
 
-# 1 Load compiled biomonitoring data (fish and macroinvertebrate)
+# 1 Load station locations for all sample collections (fish and macroinvertebrates)
 
 Combine all station locations
 
@@ -73,31 +73,285 @@ Combine all station locations
 
 list.files(taxa.dir)
 
-Fam.abund.station<-read_xlsx(paste0(taxa.dir, "/Macroinvert_Family_relative_abundance_rarified.xlsx")) |> dplyr::select(Original_ID, Latitude, Longitude, Agency) |> distinct()
+Fam.abund.station<-read.csv(paste0(taxa.dir, "/Macroinvert_MixedID_relative_abundance_rarified.csv")) |> dplyr::select(Original_ID, Latitude, Longitude, Agency) |> distinct() |> mutate(Taxa="Macroinvertebrates")
 
-Fish.station<-read_xlsx(paste0(taxa.dir, "/Fish_relative_abundance.xlsx"))|> dplyr::select(Original_ID, Latitude, Longitude, Agency) |> distinct()
+Fish.station<-read_xlsx(paste0(taxa.dir, "/Fish_relative_abundance.xlsx"))|> dplyr::select(Original_ID, Latitude, Longitude, Agency) |> distinct() |> mutate(Taxa="Fish")
 
 #Combine all stations
+#Note whether fish or invert (or both) is collected
+Stations<-bind_rows(Fam.abund.station, Fish.station) |> distinct() |> 
+  #format Original ID
+  mutate(Original_ID=as.factor(as.character(Original_ID))) |> 
+  #rounding coordinates to 5 decimal places to deal with slight differences in coordinate measurement; note: this should be done on original Fish/Invert abundance files to prevent confusion
+  mutate(Latitude=round(Latitude, 5), Longitude=round(Longitude, 5)) |> 
+  pivot_wider(names_from=Taxa,  values_from = Taxa,       values_fn = ~ "yes",                        values_fill = "no") |> mutate(Both_taxa_collected=ifelse(Macroinvertebrates=="yes"&Fish=="yes", "yes", "no"))
 
-Stations<-bind_rows(Fam.abund.station, Fish.station) |> distinct()
-
-View(Stations)
-
-
+#View(Stations)
 
 ```
 
-# 2 Link to EPA StreamCat Attributes
+# 2 Resolve Duplicate Stations
 
-## 2.1 Convert sample locations to spatial object for mapping
+## Issue 1: Sites located in close proximity, part 1
+
+-For duplicate site ID (duplicate 'Original_ID') - this appears to typically occur because site location was measured multiple times, during different site visits (*by the same agency*), have slightly different coordinate location values.
+
+-Sites with duplicate IDs were checked manually via map. Duplicate sites that were sampled in the same location by the same agency (i.e., have the same 'Original_ID') but with slightly different coordinate locations were addressed by rounding Lat/Long values to 5 decimal places.
+
+-Sites sampled in essentially the same location but by different agencies (or by the same agency but within 100m of each other) are addressed in part 2
 
 ```{r}
 
+
+head(Stations)
+names(Stations)
+#View(Stations)
+
+#First check for QC errors - 
+#same site name, different coordinates
+
+dup.site.ID<-Stations |> dplyr::select(Original_ID, Agency) |> janitor::get_dupes() |> distinct()
+#View(dup.site.ID)
+
+#25 remaining sites with exact duplicate names but slightly different Lat/Long
+#All are EPA or Carver County
+
+#Check these one by one: (note, mapped these in Arc GIS Pro for easier viewing)
+
+
+#Convert stations to shape file
+
+Stations_sf<-st_as_sf(Stations, coords=c("Longitude", "Latitude"), crs=4269, remove=FALSE)
+
+
+dup.site.ID$Original_ID
+
+
+#For remaining duplicates, select one set of coordinates for each
+
+#Remake Stations table, without pivoting
+Stations<-bind_rows(Fam.abund.station, Fish.station) |> distinct() |> 
+  #format Original ID
+  mutate(Original_ID=as.factor(as.character(Original_ID))) |> 
+  #rounding coordinates to 5 decimal places to deal with slight differences in coordinate measurement; note: this should be done on original Fish/Invert abundance files to prevent confusion
+  mutate(Latitude=round(Latitude, 5), Longitude=round(Longitude, 5))
+
+
+#View(Stations |> filter(Original_ID %in% dup.site.ID$Original_ID))
+
+
+#For each individual site with a duplicate  location, replace all Lat/Longs with the first value in each group
+
+Stations_corrected<-Stations |> group_by(Original_ID) |>  mutate(Latitude = first(Latitude), Longitude=first(Longitude)) %>%
+  ungroup()
+
+#View(Stations_corrected |> filter(Original_ID %in% dup.site.ID$Original_ID))
+
+#Now recreate wide form of Stations!
+
+Stations_corrected<-Stations_corrected |> 
+  pivot_wider(names_from=Taxa,  values_from = Taxa,       values_fn = ~ "yes",                        values_fill = "no") |> mutate(Both_taxa_collected=ifelse(Macroinvertebrates=="yes"&Fish=="yes", "yes", "no"))
+
+#View(Stations_corrected)
+
+#Check for duplicates again!
+dup.site.ID2<-Stations_corrected |> dplyr::select(Original_ID, Agency) |> janitor::get_dupes() |> distinct()
+#no duplicates found! 
+```
+
+## Issue 2: Sites located in close proximity, part 2
+
+Sites collected by different agencies in essentially the same spot (within 100m of each other). This script creates a new merged site ID for these sites, and selects one set of coordinates (Long/Lat) to use for them. It keeps all of the original site names in the combined name, and it tracks the original collecting agency. It also tracks whether at least one of the combined sites had fish and/or macroinvertebrates collected.
+
+Note that this includes some sites (eg EC 3) that were sampled by the same agency, but in close proximity to each other (\<100m apart)
+
+**Identify nearby pairs of sites (\< 100m apart):**
+
+```{r}
+
+#Convert Stations to spatial object, with a coordinate reference system that measures distance in meters
+
+Stations_cor_sf<-st_as_sf(Stations_corrected, coords=c("Longitude", "Latitude"), remove=FALSE, crs=4269)
+
+#project to USA Albers Equal Area Conic
+Stations_proj<-st_transform(Stations_cor_sf, crs=5070)
+
+#set buffer distance between points (in meters)
+x_dist <- 100 
+
+#Create a buffer of distance x around each point
+buffered_points <- st_buffer(Stations_proj, dist = x_dist)
+
+# Self-join to find which points fall within each other's buffers
+
+neighbors <- st_join(Stations_proj, buffered_points |> dplyr::select(-c(Macroinvertebrates, Fish, Both_taxa_collected)), join = st_intersects, suffix = c("", "_neighbor"))
+
+# Filter out self-matches (where index/ID is the same)
+#ID pairs within 100m of each other
+nearby_pairs <- neighbors %>% 
+  filter(Original_ID != Original_ID_neighbor)
+
+#View(nearby_pairs)
+
+#188 sites within 100m of another site (but this includes matches in both directions)
+
+#Note that in some cases there are >2 sites within 100m of each other (eg, BE 2)
+
+#find combo name and order alphabetically in paste?
+
+```
+
+**Combine nearby pairs or groups of sites**
+
+```{r}
+
+#if station has a nearby neighbor, combine site ID names and agency designation, and select one of the lat/long coordinates
+
+
+Stations_combined<-nearby_pairs |> 
+  st_drop_geometry() |> 
+  rowwise() |>
+#Combine site ID for the sites in close proximity
+  mutate(New_ID = map2(Original_ID, Original_ID_neighbor, ~
+                        paste(sort(c(.x, .y)), collapse= '/'))) |> 
+  mutate(New_ID=as.character(New_ID)) |> 
+#Do the same for Agency
+  mutate(Agency_combined=map2(Agency, Agency_neighbor, ~
+                                paste(sort(c(.x, .y)), collapse= '/'))) |> 
+    mutate(Agency_combined=as.character(Agency_combined)) |> 
+#select only one set of coordinates for each combo
+  group_by(New_ID) |> 
+  mutate(Latitude = first(Latitude), Longitude=first(Longitude)) %>%
+    ungroup() |> 
+#now worry about sites that are in more than one pair
+group_by(Original_ID) |> 
+  mutate(Number_pairs=n()) |> 
+  ungroup() 
+  
+
+#View(Stations_combined)
+
+#One option for combining names - using igraph
+
+#Separate paths into individual long rows to find overlaps
+
+Stations_combined<-Stations_combined |> 
+  mutate(id=1:nrow(Stations_combined))
+
+Stations_combined_long <- Stations_combined %>%
+  separate_longer_delim(New_ID, delim = "/")
+
+#View(Stations_combined_long)
+
+#Create a self-join to map elements that share the same row id
+edges <- Stations_combined_long %>%
+  inner_join(Stations_combined_long, by = "New_ID", relationship = "many-to-many") %>%
+  select(from = id.x, to = id.y)
+
+#View(edges)
+
+#Turn these overlaps into a network graph and find "connected components"
+library(igraph)
+g <- graph_from_data_frame(edges, directed = FALSE)
+clusters <- components(g)$membership
+
+#Bring cluster groups back to the original data frame and combine strings
+df_clusters <- data.frame(id = as.integer(names(clusters)), group_id = clusters)
+
+#Summarize both New_ID and Agency ---
+result <- Stations_combined %>%
+  left_join(df_clusters, by = "id") %>%
+  group_by(group_id) %>%
+  summarise(
+    # Combine, split, and unique-ify New_ID
+    combined_path = paste(New_ID, collapse = "/") %>% 
+      str_split("/") %>% 
+      map_chr(~ paste(unique(.x), collapse = "/")),
+    
+    # Do exactly the same thing for the Agency column
+    combined_agency = paste(Agency, collapse = "/") %>% 
+      str_split("/") %>% 
+      map_chr(~ paste(unique(.x), collapse = "/"))
+  ) %>%
+  select(-group_id)
+
+View(result)
+
+#Join combined_path back to the Original Dataset ---
+
+#Expand the result so every single sub-ID in 'combined_path' gets its own lookup row
+lookup_table <- result %>%
+  mutate(lookup_ID = combined_path) %>% 
+  separate_longer_delim(combined_path, delim = "/") %>%
+  rename(Original_ID = combined_path) # Rename to match your original dataset column name
+
+View(lookup_table)
+
+#join back to your original dataset
+final_joined_dataset <- Stations_corrected %>%
+  left_join(lookup_table, by = "Original_ID")
+
+# View the final dataset
+View(final_joined_dataset)
+
+#check on example where multiple sites where combined:
+View(final_joined_dataset |> filter(str_detect(lookup_ID, "EC 3")))
+
+
+#Replace coordinates for grouped sites with only one set of coordinates
+#remove duplicates
+
+Stations_final<-final_joined_dataset |> 
+  mutate(SiteID=ifelse(is.na(lookup_ID), Original_ID, lookup_ID)) |> 
+  mutate(Agency_original=Agency) |> 
+  mutate(Agency_combined=ifelse(is.na(combined_agency), Agency, combined_agency)) |> 
+  group_by(SiteID) |> 
+#select one set of coordinates for each site group
+    mutate(Latitude = first(Latitude), Longitude=first(Longitude)) %>%
+#if Fish were collected at any site in a group and if Inverts were collected at any site in a group, set to yes, otherwise no?  
+  mutate(Macroinvertebrates_combined = if_else(any(str_detect(Macroinvertebrates, "yes")), "yes", "no")) %>%
+  mutate(Fish_combined = if_else(any(str_detect(Fish, "yes")), "yes", "no")) %>%
+  ungroup()
+
+View(Stations_final)
+  
+#check on example where multiple sites where combined:
+View(Stations_final |> filter(str_detect(lookup_ID, "EC 3")))
+
+  
+#Clean up table
+names(Stations_final)
+
+Stations_final_clean<-Stations_final |> 
+  dplyr::select(SiteID, Original_ID, Agency_combined, Agency_original, Latitude, Longitude, Macroinvertebrates_combined, Fish_combined) |> 
+    dplyr::rename(Macroinvertebrates=Macroinvertebrates_combined, Fish=Fish_combined) |> 
+    mutate(Both_taxa_collected=ifelse(Macroinvertebrates=="yes"&Fish=="yes", "yes", "no")) |> distinct()
+  
+View(Stations_final_clean)
+
+View(Stations_final_clean |> filter(str_detect(SiteID, "EC 3")))
+
+
+#Write cleaned Stations to file
+write_xlsx(Stations_final_clean, paste0(env.dir, "/Stations_cleaned.xlsx"))
+```
+
+# 3 Link stations to NHD stream network
+
+## 3.1 Convert sample locations to spatial object for mapping
+
+```{r}
+
+#Read in Station data so far
+Stations_final_clean<-read_excel(paste0(env.dir, "/Stations_cleaned.xlsx"))
+
+names(Stations_final_clean)
+
 #Convert sample locations to spatial object:}
 
-loc_sf<-st_as_sf(Stations, coords=c("Longitude","Latitude"), crs=4269, remove=FALSE)
+loc_sf<-st_as_sf(Stations_final_clean, coords=c("Longitude","Latitude"), crs=4269, remove=FALSE)
 
-View(loc_sf)
+#View(loc_sf)
 
 #Quick plot check of all compiled data:#(choose interactive or static viewing)
 
@@ -109,10 +363,12 @@ Sites.map<-
 
 Sites.map
 
+#first transform to 
+loc_proj <- st_transform(loc_sf, 5070) 
 
 ```
 
-## 2.2 Get Area of Interest for extracting spatial attributes
+## 3.2 Get Area of Interest for extracting spatial attributes
 
 ```{r}
 
@@ -127,16 +383,16 @@ plot(loc_bbox)
 
 HUC4<-get_huc(AOI = loc_bbox, type = "huc04") 
 
-
 #plot locations of sample sites, and HUC4 boundaries  
 
-tmap_mode("view")  
+tmap_mode("plot")  
 
-tm_shape(loc_sf)+   
-  tm_dots(col="purple",alpha=0.4)+
-  tm_shape(HUC4)+   
+tm_shape(HUC4)+   
   tm_borders(col="blue")+   
-  tm_labels("name")
+  tm_labels("name")+
+tm_shape(loc_sf)+   
+  tm_dots(fill="purple",fill_alpha=0.4)
+  
   #tm_text("name", size = 1.0, col = "black", xmod = 0.2, ymod = -0.2, remove.overlap = FALSE)
 ```
 
@@ -147,9 +403,20 @@ Dissolve HUC4 boundaries to create a hydrologic AOI:
 HUC4_AOI <- st_union(HUC4)  
 
 plot(HUC4_AOI)
+
+tm_shape(HUC4)+   
+  tm_borders(col="blue")+   
+  tm_labels("name")+
+  tm_shape(loc_sf)+   
+  tm_dots(fill="purple",fill_alpha=0.4)+
+  tm_shape(HUC4_AOI)+
+  tm_borders(col="red")
+
+st_crs(HUC4_AOI)
+
 ```
 
-## 2.3 National Hydrography Dataset (NHD)
+## 3.3 National Hydrography Dataset (NHD)
 
 Use nhdplusTools package to link sample locations to NHD COMID (unique identifier for each stream reach of the NHD).
 
@@ -161,9 +428,58 @@ To do this, we will join sample locations to NHD catchments. This avoids issues 
 
 [https://www.epa.gov/system/files/documents/2023-04/NHDPlusV2_User_Guide.pdf](https://www.epa.gov/system/files/documents/2023-04/NHDPlusV2_User_Guide.pdf,)
 
-### 2.3.a Download NHD catchment boundaries for area of interest
+### 3.3.a Download NHD catchment boundaries for area of interest
 
-Note, this can take considerable time for large spatial area, eg 13 min for state of IL
+**Note: you only need to do this for your whole study area (the AOI) once**
+
+Note: You need to use NHDPlusv2, as that is the NHD version with COMID identifiers that link to StreamCat. To encompass all Minnesota watersheds, NHDPlusv2 data is needed for the following regions:
+
+09 Souris-Red-Rainy
+
+07 Upper Mississippi
+
+04 Great Lakes
+
+10L Upper Missouri
+
+10U Lower Missouri
+
+#### Option 1: Download NHD data directly to GIS folder
+
+Note: this is the method applied in the current approach.
+
+Access via: <https://www.epa.gov/waterdata/get-nhdplus-national-hydrography-dataset-plus-data#Download>
+
+Downloaded the catchment and NHD snapsot shapefiles from NHDPlusv2 for the above regions. Last accessed: 10.29.26. Catchment and NHD flowline shapefiles were merged and clipped to the bounding box surrounding all biomonitoring stations (which were first buffered to 1km), and exported as `NHDPlusv2_catchments_StationsBounded.shp`
+
+```{r}
+
+#read in NHD catchment layer for study area
+#These were previously downloaded, merged and clipped into one shapefile in ArcGIS Pro
+
+NHD_catchment<-st_read(paste0(spatial.dir, "/NHDPlusv2_catchments_StationsBounded.shp"))
+
+#Create COMID column 
+
+names(NHD_catchment)
+NHD_catchment<-NHD_catchment |> 
+  mutate(comid=FEATUREID)
+
+```
+
+```{r}
+#Quick map check
+
+tmap_mode("view")
+tm_shape(NHD_catchment)+
+  tm_borders()
+```
+
+#### Option 2: use nhdPlustools package
+
+**NOTE: not needed if using Option 1 above**
+
+Note, this can take considerable time for large spatial area, can sometimes crash, and sometimes fails to capture full spatial extent for large search area (i.e., large AOI).
 
 Note that Feature ID= COMID for stream locations, see <https://www.epa.gov/national-aquatic-resource-surveys/streamcat-dataset-readme>
 
@@ -188,6 +504,7 @@ End.time<-Sys.time()
 total.time<-End.time-Start.time
 total.time 
 
+st_crs(NHD_catchment)
 names(NHD_catchment)  
 
 #View(NHD_catchment)  
@@ -203,36 +520,488 @@ tm_shape(NHD_catchment)+
 
 #write to file if you want to save the stream network shapefile: 
 
-st_write(NHD_catchment, paste0(spatial.dir, "/nhd_catchment.shp"), append=FALSE)
+#st_write(NHD_catchment, paste0(spatial.dir, "/nhd_catchment_R.shp"), append=FALSE)
 
 ```
 
-### 2.3.b Identify NHD COMIDs associated with sample locations
+### 3.3.b Identify NHD COMIDs associated with sample locations
 
 see NHDv2Plus User Guide: <https://nhdplus.com/NHDPlus/NHDPlusV2_documentation.php>
 
 ```{r}
 
-#first transform sample points and catchments to same projection:  
+
+#transform sample points and catchments to same projection:  
 
 #continental US (Conus Albers NAD83)    
 
 loc_proj <- st_transform(loc_sf, 5070) 
 
 NHD_catch_proj<-st_transform(NHD_catchment, 5070)
+names(NHD_catch_proj)
 
 #Join catchment attributes to sample locations:
 
-loc_NHD <- st_join(loc_proj, NHD_catch_proj %>% dplyr::select(comid, areasqkm), join = st_intersects)    
+loc_NHD <- st_join(loc_proj, NHD_catch_proj %>% dplyr::select(comid, AreaSqKM), join = st_intersects)    
 
 View(loc_NHD)
 
+#Check for NA values in comid
+loc_NHD |> filter(is.na(comid))
+
+#Check sites with NA for COMID
+
+tm_shape(loc_NHD)+
+  tm_dots()+
+tm_shape(loc_NHD |> filter(is.na(comid)))+
+  tm_dots(fill="red")
+
+#1 site excluded, which does not overlap with NHDPlusV2, is in a Canadian watershed
+
 #write to file (without geometry)
 
-write_xlsx(loc_NHD %>% st_drop_geometry(), paste0(env.dir, "/Stations.xlsx"))
+write_xlsx(loc_NHD %>% st_drop_geometry(), paste0(env.dir, "/Stations_clean_comid.xlsx"))
 ```
 
-## 2.4 Get StreamCat attributes using StreamCatTools
+## 3.4 Sites within the same NHD catchment
+
+For multiple sites within the same comid (the same NHD catchment), but with distinct locations (i.e., longitudinally along a river reach)
+
+-For analysis, one option is to group the samples by comid, and treat them as repeat visits. –\> use the COMID as the site ID!
+
+-An issue: sometimes real information is tracked in these close sites within the same comid- ie, up and downstream of changes in topography, elevation, land use, inputs, etc (might be quite specific). For example Riley Creek or Battle Creek sites. Combining them might be OK for most watershed scale effects, but may need to track variability in outcomes.
+
+-Possible ways to handle this for spatial analysis across catchments:
+
+-pick site closest to catchment outlet
+
+-have some estimate of catchment variability
+
+-One thing that could help is to track how many catchments have multiple sites longitudinally (for this to be most useful, probably do want to combine sites within 100m of each other)
+
+**Identify if sites are part of a longitudinal series in a catchment**
+
+(i.e., \> 1 site per NHD catchment)
+
+```{r}
+
+#read in Stations data so far
+
+Stations_clean_comid<-read_excel(paste0(env.dir, "/Stations_clean_comid.xlsx"))
+
+names(Stations_clean_comid)
+
+Stations_clean_comid<-Stations_clean_comid |> 
+  group_by(comid) |> 
+  mutate(Num_sites_catchment=n()) |> 
+  ungroup()
+
+View(Stations_clean_comid)
+
+#Look at breakdown for # of sites per NHD catchment
+
+summary(Stations_clean_comid$Num_sites_catchment)
+
+#Most sites have 1 sample per catchment, but a minority have more
+
+Stations_clean_comid |> dplyr::select(Num_sites_catchment) |> group_by(Num_sites_catchment) |> count()
+
+#update Stations file
+write_xlsx(Stations_clean_comid, paste0(env.dir, "/Stations_clean_comid.xlsx"))
+
+```
+
+## 3.5 Identify sites closest to NHD catchment outlet
+
+NOTE: UNDER CONSTRUCTION 11.9.26 - this section not yet complete
+
+(i.e., most downstream site in any catchment)
+
+```{r}
+
+# 1. Load spatial locations (if not already loaded)
+Stations_clean_comid<-read_excel(paste0(env.dir, "/Stations_clean_comid.xlsx"))
+
+#Convert to shape file
+Stations_clean_sf<-st_as_sf(Stations_clean_comid, coords=c("Longitude", "Latitude"), crs=4269)
+
+#Project stations
+Stations_clean_proj<-st_transform(Stations_clean_sf, crs=5070)
+
+#Load NHD stream network (downloaded in section 3.3):
+nhd_flowline <- st_read(paste0(spatial.dir, "/NHDFlowline_merge_StationsBounded.shp"))
+
+#Project flowlines to same crs
+nhd_flowline_proj<-st_transform(nhd_flowline, crs=5070)
+
+names(nhd_flowline_proj)
+
+# 2. Find nearest feature index and compute the nearest point on the line
+nearest_idx <- st_nearest_feature(Stations_clean_proj, nhd_flowline_proj)
+nearest_lines <- nhd_flowline_proj[nearest_idx, ]
+
+# 3. Project points onto the lines
+snapped_points <- st_line_project(nearest_lines, Stations_clean_proj)
+
+#Snap points to the closest NHD flowlines to find reach measures (i.e., distance along the flowline)
+# This function calculates where the point snaps along the reach
+
+start.time<-Sys.time()
+start.time
+
+#try downloading nhd using nhdplustools (note that this may not work for large areas)
+
+indexed_points <- get_flowline_index(
+  flines = "download_nhdplusv2",
+  points = Stations_clean_proj,
+  search_radius = 100,
+  max_matches=1)
+
+#Note - need to check to see whether this is pulling info for correct line, if point is close to two lines
+
+end.time<-Sys.time()
+end.time
+
+# 3. Combine your original point data with the NHD indexing attributes
+points_with_nhd <- bind_cols(my_points, indexed_points)
+
+# 4. Group by Catchment (COMID) and pick the point closest to 0 (most downstream)
+most_downstream_points <- points_with_nhd %>%
+  group_by(COMID) %>%
+  slice_min(order_by = REACH_MEAS, n = 1, with_ties = FALSE) %>%
+  ungroup()
+```
+
+# 4. Important! Add clean station info to Fish and Invert datasets!
+
+The final selected coordinates for each site ID will also need to be assigned to the final Fish and Invert relative abundance files, and rewriting those final files (see below).
+
+NOTE: check for "repeat" visits on same date and site ID combo, that might be data sources originally merged from multiple sources OR slightly different samples that could be treated as replicates (eg, EC3)
+
+-EC3 is particularly tricky, because upstream and downstream sites were sampled on the same day; so if you combine IDs, these will basically become replicates - are you going need to reaggregate abundance by site/date once IDs are combined? or assign replicates
+
+-\*\*Check for this! How many "replicates" does this create? Is there a way to track this? (if you keep track of their original IDs, that could be way to track replicates on same date)
+
+## 4.1 Combine sites into groups and recalculate relative abundance of sites in a group were sampled on the same date
+
+```{r}
+
+#Read in cleaned up Stations file:
+
+Stations_clean_comid<-read_excel(paste0(env.dir, "/Stations_clean_comid.xlsx"))
+
+#Read in fish/invert datasets
+
+list.files(taxa.dir)
+
+#--------------------------------------------
+#Macroinvert dataset: FAMILY ID
+#--------------------------------------------
+invert_Family<-fread(paste0(taxa.dir, "/Macroinvert_Family_relative_abundance_rarified.csv"))
+
+names(invert_Family)
+
+View(invert_Family)
+#if Original station IDs are within combined name in Station file, combine
+#If samples were collected on same day from multiple sites, recalculate relative abundance
+#and replace Lat/Long with coordinbates for combined site
+
+names(Stations_clean_comid)
+View(Stations_clean_comid)
+
+#if same merged name and same date but different Original ID, treat as replicates and combine counts
+
+invert_Family2<-invert_Family |>
+  dplyr::select(-c(Latitude, Longitude)) |> 
+#add new combined SiteID where appropriate, keep Lat/Long from new merged ID
+  left_join(Stations_clean_comid, by=c("Original_ID")) |> 
+  #if samples collected from combined site ID on same day, recalculate relative abundance (this should be a very rare occurrence, but just in case)
+  #note that suborder is excluded here, as some lumped families cross different suborders;
+  group_by(SiteID, Date, Year, Agency_combined, Latitude, Longitude, phylum, class, order, family) |> 
+  dplyr::summarize(Fam_sitegroup=sum(FamRarifyCount)) |> 
+  ungroup() |> 
+  group_by(SiteID, Date) |> 
+  mutate(Total_fam_ALL_specimens_rarifed=sum(Fam_sitegroup)) |> 
+  mutate(Rel_abund_fam=Fam_sitegroup/Total_fam_ALL_specimens_rarifed) |> 
+  ungroup() |> 
+  rename(FamRarifyCount=Fam_sitegroup) |> 
+  #put columns in more legible order
+  dplyr::select(SiteID, Date, Year, Latitude, Longitude, Agency_combined, phylum, class, order, family, FamRarifyCount, Total_fam_ALL_specimens_rarifed, Rel_abund_fam)
+
+#compare before and after 
+View(invert_Family |> filter(Original_ID== "EC 3"))
+View(invert_Family2 |>  filter(str_detect(SiteID, "EC 3")&Date==as.Date("2019-08-01")))
+
+invert_Family2 |> janitor::get_dupes()
+
+#write corrected data to file:
+fwrite(invert_Family2, paste0(taxa.dir, "/Macroinvert_Family_relative_abundance_rarified_SiteClean.csv"))
+
+#-------------------------------------------
+#Macroinvert: MIXED ID dataset
+#-------------------------------------------
+
+invert_Mixed<-fread(paste0(taxa.dir, "/Macroinvert_MixedID_relative_abundance_rarified.csv"))
+names(invert_Mixed)
+#if Original station IDs are within combined name in Station file, combine
+#If samples were collected on same day from multiple sites grouped as one, recalculate relative abundance
+#and replace Lat/Long with coordinbates for combined site
+
+invert_Mixed2<-invert_Mixed |>
+  dplyr::select(-c(Latitude, Longitude)) |> 
+  #add new combined SiteID where appropriate, keep Lat/Long from new merged ID
+  left_join(Stations_clean_comid, by=c("Original_ID")) |> 
+  #if samples collected from combined site ID on same day, recalculate relative abundance
+  group_by(SiteID, Date, Year, Agency_combined, Latitude, Longitude, phylum, class, subclass, order, suborder, family, subfamily, genus, name, lowest_common_designation, finest_level) |> 
+  dplyr::summarize(RarifyCount_sitegroup=sum(RarifyCount)) |> 
+  ungroup() |> 
+  group_by(SiteID, Date) |> 
+  mutate(Total_ALL_specimens_rarifed=sum(RarifyCount_sitegroup)) |> 
+  mutate(Relative_abundance=RarifyCount_sitegroup/Total_ALL_specimens_rarifed) |> 
+  ungroup() |> 
+  rename(RarifyCount=RarifyCount_sitegroup) |> 
+  #put columns in more legible order
+  dplyr::select(SiteID, Date, Year, Latitude, Longitude, Agency_combined, phylum, class, subclass, order, suborder, family, subfamily, genus, name, lowest_common_designation, finest_level, RarifyCount, Total_ALL_specimens_rarifed, Relative_abundance)
+
+View(invert_Mixed |> filter(Original_ID=="06SC002"))
+View(invert_Mixed2 |> filter(SiteID=="06SC002"))
+
+levels(factor(invert_Mixed$genus))
+
+#write corrected data to file:
+fwrite(invert_Mixed2, paste0(taxa.dir, "/Macroinvert_MixedID_relative_abundance_rarified_SiteClean.csv"))
+
+#------------------------------------------
+#Macroinvertebrates: Genus dataset
+#------------------------------------------
+invert_Genus<-fread(paste0(taxa.dir, "/Macroinvert_Genus_relative_abundance_rarified.csv"))
+
+names(invert_Genus)
+#if Original station IDs are within combined name in Station file, combine
+#If samples were collected on same day from multiple sites grouped as one, recalculate relative abundance
+#and replace Lat/Long with coordinbates for combined site
+names(Stations_clean_comid)
+
+invert_Genus2<-invert_Genus |>
+  dplyr::select(-c(Latitude, Longitude)) |> 
+  #add new combined SiteID where appropriate, keep Lat/Long from new merged ID
+  left_join(Stations_clean_comid, by=c("Original_ID")) |> 
+  #if samples collected from combined site ID on same day, recalculate relative abundance
+  group_by(SiteID, Date, Year, Agency_combined, Latitude, Longitude, phylum, class, subclass, order, suborder, family, subfamily, genus, name, lowest_common_designation, finest_level) |> 
+  dplyr::summarize(RarifyCount_sitegroup=sum(RarifyCount)) |> 
+  ungroup() |> 
+  group_by(SiteID, Date) |> 
+  mutate(Total_ALL_specimens_rarifed=sum(RarifyCount_sitegroup)) |>
+  mutate(Relative_abundance=RarifyCount_sitegroup/Total_ALL_specimens_rarifed) |> 
+  ungroup() |> 
+  #Rename count column
+  rename(RarifyCount=RarifyCount_sitegroup) |> 
+  #put columns in more legible order
+  dplyr::select(SiteID, Date, Year, Latitude, Longitude, Agency_combined, phylum, class, subclass, order, suborder, family, subfamily, genus, name, lowest_common_designation, finest_level, RarifyCount, Total_ALL_specimens_rarifed, Relative_abundance)
+
+
+View(invert_Genus |> filter(Original_ID=="06SC002"))
+View(invert_Genus2 |> filter(SiteID=="06SC002"))
+
+#write corrected data to file:
+fwrite(invert_Genus2, paste0(taxa.dir, "/Macroinvert_Genus_relative_abundance_rarified_SiteClean.csv"))
+
+#-------------------------------------------
+#Fish dataset
+#-------------------------------------------
+Fish<-read_excel(paste0(taxa.dir, "/Fish_relative_abundance.xlsx"))
+names(Fish)
+#if Original station IDs are within combined name in Station file, combine
+#If samples were collected on same day from multiple sites, recalculate relative abundance
+#and replace Lat/Long with coordinbates for combined site
+names(Stations_clean_comid)
+
+View(Fish)
+
+Fish2<-Fish |>
+  dplyr::select(-c(Latitude, Longitude)) |> 
+  #add new combined SiteID where appropriate, keep Lat/Long from new merged ID
+  left_join(Stations_clean_comid, by=c("Original_ID")) |> 
+  #if samples collected form combined site ID on same day, recalculate relative abundance
+  #note: dropping GearType, as different listings for gear type (ie, NA vs 'Shocking') will cause samples to be counted separately. Note that gear type for sites is typically electroshocking
+  group_by(SiteID, Latitude, Longitude, Agency_combined, Date, Year, Genus, Species, FullScientificName, CommonName) |>
+  #first recount number of each species by site group & date
+  summarize(Number_sitegroup=sum(Number)) |> 
+  ungroup() |> 
+  
+  #then recalculate relative abundance by site/date
+  group_by(SiteID, Date) |> 
+  mutate(TotalCount=sum(Number_sitegroup)) |> 
+  ungroup() |> 
+  mutate(Relative_abundance=Number_sitegroup/TotalCount) |>
+  mutate(Number=Number_sitegroup) |> 
+  #put columns in more legible order
+  dplyr::select(SiteID, Date, Year, Latitude, Longitude, Agency_combined, Genus, Species, FullScientificName, CommonName, Number, TotalCount, Relative_abundance)
+
+nrow(Fish)
+nrow(Fish2)
+
+#Do some checks to make sure numbers were retabulated correctly
+View(Fish |> filter(str_detect(Original_ID, "EC 3")&!Original_ID=="EC 3 MN River"))
+View(Fish2 |> filter(str_detect(SiteID, "EC 3")))
+
+View(Fish |> filter(Original_ID=="06SC002"))
+View(Fish2 |> filter(SiteID=="06SC002"))
+
+#Check for duplicates
+
+View(Fish2 |> janitor::get_dupes())
+#dropping Gear Type caused samples to be combine by location/date
+
+Fish.dupes<-Fish |> janitor::get_dupes()
+levels(factor(Fish.dupes$Agency))
+
+View(Fish |> filter(Original_ID %in% c("94RD511", "USGS-05086000")))
+
+View(Fish2 |> filter(str_detect(SiteID, "USGS-05086000")) |> 
+       filter(Year=="1994")
+                     
+                     )
+
+#OK ISSUES STILL TO RESOLVE:
+#1. in some (rare) cases, different agencies (USGS/MPCA) sampled on the same day at the same spot; in at least one case, the two samples appear to be separate (not duplicates). They can be treated as replicates and combined to calculate relative abundance, but they are being kept separate here by GearType; so will need to combine gear type earlier, or drop it here - OK dropped it for now
+
+#2. in some cases, an agency is sampling the same location over multiple adjacent days - these could also be combined, as long as relative abundance is used. You might want to combine dates before  
+#3. there may be some cases, where 1 sample was in two separate datasets, under different site names. (true duplicates). these could also be combined, as long as relative abundance is used 
+#eg, View(Fish2 |> filter(str_detect(SiteID, "USGS-05086000" & Year=="1994"))) #-->this appears to be a true replicate. but how to handle this?
+
+#write corrected data to file:
+write_xlsx(Fish2, paste0(taxa.dir, "/Fish_relative_abundance_SiteClean.xlsx"))
+```
+
+## 4.2 Add a flag for sites that were sampled over adjacent days (indicating these samples could be combined)
+
+```{r}
+
+#For Fish
+
+Fish2_flagged <- Fish2 %>%
+  #group by SiteID
+  group_by(SiteID) %>%
+  #make sure Date is formatted as Date
+  mutate(Date=as.Date(Date)) |>
+  #arrange dates in order for each site
+  arrange(Date, .by_group = TRUE) %>%
+ #calculate lag time between each set of rows
+  mutate(
+    diff_prev = (Date - lag((Date))),
+    diff_next = (lead(Date) - Date)
+    #Adjacent_day_collection = (diff_prev = 1 | diff_next = 1
+    ) %>%
+  mutate(Adjacent_day_collection=ifelse(diff_prev=="1 days"|diff_next=="1 days", "Yes", "No")) |> 
+  ungroup() |> 
+  #if any rows in a site/date combo are one, mark Adjacent_day_column as yes
+  group_by(SiteID, Date) |> 
+  mutate(
+    Adjacent_date_sampled = if_else(any(c(diff_prev, diff_next) == 1, na.rm = TRUE), "yes", "no")
+  ) |> 
+  ungroup()
+
+View(Fish2_flagged)
+
+View(Fish2_flagged |> filter(Adjacent_date_sampled=="yes"))
+
+View(Fish2_flagged |> filter(str_detect(SiteID, "USGS-05086000")) |> 
+       filter(Year=="1994")
+     
+)
+
+#Some samples collected over two days, some over 3
+
+#Option to recalculate relative abundance across two adjacent days
+#An imperfect solution could be to group by SiteID and Year, and recalculate relative abundance
+#Only issue is if for some reason a site was sampled twice in one year at different times in the summer
+#You can inspect manually if this is the case - it isn't for fish as of 11.12.26
+
+#First make look up table to match the first date of each collection to the site/year group
+Date.match<-Fish2_flagged |> 
+  filter(Adjacent_date_sampled=="yes") |> 
+  dplyr::select(SiteID, Date, Year) |> 
+  distinct() |> 
+  group_by(SiteID, Year) |> 
+  slice_head(n=1)
+Date.match
+
+Fish2_flagged_grouped<-Fish2_flagged |> 
+#only for samples with adjacent day collections
+    filter(Adjacent_date_sampled=="yes") |> 
+  #recalculate abundance by Year, leave out date for now
+  group_by(SiteID, Latitude, Longitude, Agency_combined, Year, Genus, Species, FullScientificName, CommonName) |>
+  #first recount number of each species by site group & date
+  summarize(Number_adjacentday=sum(Number)) |> 
+  ungroup() |> 
+  
+  #then recalculate relative abundance by site/year
+  group_by(SiteID, Year) |> 
+  mutate(TotalCount=sum(Number_adjacentday)) |> 
+  ungroup() |> 
+  mutate(Relative_abundance=Number_adjacentday/TotalCount) |>
+  #Rename number column
+  mutate(Number=Number_adjacentday) |>
+  #add first day of collection back in as date
+  left_join(Date.match, by=c("SiteID", "Year")) |> 
+  #put columns in more legible order
+  dplyr::select(SiteID, Date, Year, Latitude, Longitude, Agency_combined, Genus, Species, FullScientificName, CommonName, Number, TotalCount, Relative_abundance)
+
+#Spot check that this worked correctly:
+
+View(Fish2_flagged_grouped)
+
+View(Fish |> filter(Original_ID %in% c("94RD511", "USGS-05086000")))
+
+View(Fish2 |> filter(str_detect(SiteID, "USGS-05086000")) |> 
+       filter(Year=="1994"))
+
+View(Fish2_flagged_grouped |> filter(str_detect(SiteID, "USGS-05086000")))
+
+#rewrite corrected data to file
+write_xlsx(Fish2_flagged_grouped, paste0(taxa.dir, "/Fish_relative_abundance_SiteClean.xlsx"))
+
+#--------------------------------------------
+#Inverts
+#-------------------------------------------
+#Is this even an issue for Inverts?
+#-->NO, see table below
+#Inverts do not need to be corrected for adjacent day collection as of 11.13.26
+
+invert_Mixed2_flagged <- invert_Mixed2 %>%
+  #group by SiteID
+  group_by(SiteID) %>%
+  #make sure Date is formatted as Date
+  mutate(Date=as.Date(Date)) |>
+  #arrange dates in order for each site
+  arrange(Date, .by_group = TRUE) %>%
+  #calculate lag time between each set of rows
+  mutate(
+    diff_prev = (Date - lag((Date))),
+    diff_next = (lead(Date) - Date)
+    #Adjacent_day_collection = (diff_prev = 1 | diff_next = 1
+  ) %>%
+  mutate(Adjacent_day_collection=ifelse(diff_prev=="1 days"|diff_next=="1 days", "Yes", "No")) |> 
+  ungroup()
+
+invert_Mixed2_flagged |> filter(Adjacent_day_collection=="Yes")
+
+```
+
+Fish samples with really high counts
+
+```{r}
+
+summary(Fish2_flagged_grouped$TotalCount)
+
+```
+
+# 5 Link to EPA StreamCat Attributes
+
+## 5.1 Get StreamCat attributes using StreamCatTools
+
+Note: These attributes are pulled for the state of MN, so unless new attributes are added/selected, you should only have to run this section once, to generate attributes for all comids in MN.
 
 The `StreamCatTools` package was designed to simplify the use of [StreamCat](https://www.epa.gov/national-aquatic-resource-surveys/streamcat-dataset) data in R, leveraging the new [API for StreamCat](https://api.epa.gov/StreamCat/streams/metrics).
 
@@ -246,10 +1015,6 @@ Some additional metadata on new Streamcat attributes: <https://pasteur.epa.gov/u
 
 Note: To access StreamCat data for a large number of sites, the most successful strategy appears to be to pull them by state. If you try to pull by long list of comids, you often get a bad request error. But, pulling by state can take considerable time (1-2 hours).
 
-UPDATE IN PROGRESS: GET FULLER LIST OF STREAMCAT ATTRIBUTES FOR ALL BIOMONITORING SITES
-
--ideally, run for all sites, not just inverts
-
 ```{r}
 
 
@@ -257,7 +1022,7 @@ UPDATE IN PROGRESS: GET FULLER LIST OF STREAMCAT ATTRIBUTES FOR ALL BIOMONITORIN
 
 #Get a list of all Streamcat attributes available: 
 All.Streamcat<-sc_get_params(param="metric_names")
-
+All.Streamcat
 
 #View(as.data.frame(All.Streamcat))
 
@@ -360,7 +1125,7 @@ fwrite(sc_data_rp, paste0(env.dir, "/Streamcat_MNBIO_catRP_wsRP.csv"))
 
 ```
 
-## 2.5 Merge StreamCat attributes by COMID to sampling location
+## 5.2 Merge StreamCat attributes by COMID to sampling location
 
 Note: if you merge all attributes to all water quality data, it creates a very large dataset that is slow to work with. So if you need something that is quicker to work with, you may want to subset attributes or water quality data you want first before merging them.
 
@@ -368,10 +1133,20 @@ Something else important to know! StreamCat summarizes attributes at both the wa
 
 ```{r}
 
-#Merge to grid points
+
+#Read in Station data
+Stations_clean_comid<-read_excel(paste0(env.dir, "/Stations_clean_comid.xlsx"))
+
+#Read in StreamCat data for all MN sites
+
+sc_data<-fread(paste0(env.dir, "/Streamcat_MNBIO_cat_ws.csv"))
+
+sc_data_rp<-fread(paste0(env.dir, "/Streamcat_MNBIO_catRP_wsRP.csv"))
+
+#Merge to sample points
 
 #first cat, ws: 
-BIO.streamcat<-left_join(loc_NHD, sc_data, by="comid")
+BIO.streamcat<-left_join(Stations_clean_comid, sc_data, by="comid")
 
 head(BIO.streamcat)
 
@@ -383,15 +1158,20 @@ names(BIO.streamcat.all)
 
 View(BIO.streamcat.all)
 
+
+#Check for loss of stations
+nrow(Stations_clean_comid)
+nrow(BIO.streamcat.all)
+
 #Write to file to save intermediate work (use fwrite for large file, much faster than write.csv)
 fwrite(BIO.streamcat.all, paste0(env.dir, "/Streamcat.MNBIO.all.csv"))
 ```
 
-# 3 Explore Environmental Data
+# 6 Explore Environmental Data
 
-## 3.1 Examine change in riparian and watershed scale land use
+## 6.1 Examine change in riparian and watershed scale land use
 
-**Note: is there a better dataset to use for this?**
+Note: is there a better dataset to use for this?
 
 ```{r}
 
@@ -403,6 +1183,9 @@ head(sites.streamcat)
 nrow(sites.streamcat)
 
 tot.num.sites<-nrow(sites.streamcat)
+
+
+
 
 View(sites.streamcat)
 
@@ -498,7 +1281,7 @@ ggplot(Tot.Diff %>% filter(grepl("rp", Landcover)) %>% filter(grepl("cat", Landc
 
 ```
 
-## 3.2 Map land use change
+## 6.2 Map land use change
 
 Land use change is from NLCD, 2001-2019. 'total_pct_diff' reflects net land use change.
 

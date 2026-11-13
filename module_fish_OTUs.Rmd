@@ -9,17 +9,13 @@ editor_options:
 
 # Overview
 
-This script checks and resolves operational taxonomic units (OTUs) for fish taxa and creates a rarified relative abundance dataset at several different taxonomic resolutions (family, genus, and mixed ID).
+This script:
 
-Options:
+1)  combines fish data from local/regional, state and federal sources
 
--throw out hybrids
+2)  checks and resolves taxonomic IDs for fish taxa
 
--throw out coarser than species IDs
-
--for USGS/EPA, if contains ".x." list as hybrid with genus name
-
-\-
+3)  creates a relative abundance dataset.
 
 # Set Up Workspace
 
@@ -60,13 +56,45 @@ taxa.dir<-paste0(root.dir, "/Data/processed_taxonomic_datasets")
 fig.dir<-paste0(root.dir, "/Data/Figures_Tables")
 ```
 
-# Load in all sources of data
+# Load in fish data
 
-- MPCA
+Fish data was compiled from:
 
-- finsync (USGS and EPA data, preprocessed by Mahon et al 2024)
+1)  Twin Cities local water management organizations
+
+2)  Minnesota Pollution Control Agency (MPCA, state level)
+
+3)  USGS/USEPA (via finsyncR).
+
+Twin Cities Fish Data was processed and compiled in `module_data_processing_TCMetro.Rmd` and `module_compiling_TC_biodata.Rmd`. Twin Cities data is from the following agencies:
+
+- Riley Purgatory (Twin Cities Metro)
+
+- Carver County (Twin Cities Metro)
+
+- Three Rivers Park District (Twin Cities Metro)
+
+MPCA data was processed and compiled in `module_data_processing_TCMetro.Rmd`
+
+USGS/EPA data was compiled using finsyncR (Mahon et al., 2024) in `module_data_processing_finsyncR.Rmd`
 
 Note that all data are raw counts.
+
+## Twin Cities Metro data
+
+```{r}
+
+list.files(input.dir)
+
+TC.fish<-fread(paste0(input.dir, "/TC_final_combined_data_fish.csv"))
+
+names(TC.fish)
+
+#check for duplicates
+TC.fish |> janitor::get_dupes()
+```
+
+## MPCA and USGS/EPA data
 
 ```{r}
 
@@ -90,7 +118,8 @@ QC check - check for duplicates in individual datasets
 ##MPCA:
 mpca %>% janitor::get_dupes()
 #no duplicates
-
+names(mpca)
+mpca |> dplyr::select(Original_ID, Collection_Date, Year, Agency, FullScientificName, Number, Latitude, Longitude, replicate, GearType) |> janitor::get_dupes()
 
 #USGS/EPA:
 nat %>% 
@@ -100,6 +129,7 @@ nat %>%
 #No dupes across all columns, but: 
 
 #When I subset columns to those I use in aggregated data, get duplicates:
+#Eliminate these duplicates below
 
 nat.dup.check<-
 nat %>% 
@@ -111,10 +141,18 @@ nat %>%
     janitor::get_dupes()
 
 
-
+View(nat.dup.check) #limited number - 69 rows total
 ```
 
 # Clean up data to match across datasets
+
+Resolve taxonomic IDS:
+
+-throw out hybrids
+
+-throw out coarser than species IDs
+
+-for USGS/EPA, if contains ".x." list as hybrid with genus name
 
 For MPCA, how many records are genus only (so species ID)
 
@@ -125,6 +163,9 @@ For MPCA, how many records are genus only (so species ID)
 mpca2<-mpca |> filter(!is.na(Species)) |> 
   mutate(Date=as.Date(Collection_Date, format="%Y-%m-%d")) |> 
   dplyr::select(-c(Collection_Date))
+
+#Check for duplicates
+mpca2 |> janitor::get_dupes()
 
 ```
 
@@ -139,6 +180,8 @@ nat2<-nat%>%
   dplyr::rename(Original_ID=SiteNumber, Year=CollectionYear, FullScientificName=Name, Latitude=Latitude_dd, Longitude=Longitude_dd, GearType=SampleMethod) %>% #format column names
   mutate(replicate=1) %>%  #add replicate column (no site/date replicates in USGS/EPA dataset)
   dplyr::select(Original_ID, Date, Year, Agency, FullScientificName, Number, Latitude, Longitude, replicate, GearType, COMID) |> 
+#remove erroneous duplicates noted above  
+  distinct() |> 
   mutate(
     FullScientificName = if_else(
       str_detect(FullScientificName, fixed(".x.")),
@@ -160,59 +203,150 @@ setdiff(mpca2$FullScientificName, nat2$FullScientificName)
 
 setdiff(nat2$FullScientificName,mpca2$FullScientificName) #mpca dataset much more extensive - many more species 
 
+#check duplicates for national data
+nat2 |> janitor::get_dupes() #no duplicates
+
+```
+
+For Twin Cities metro data, format to match columns and species designations
+
+```{r}
+
+
+#target columns:
+names(mpca2)
+
+#Make a species look up table from mpca data
+taxonomy<-mpca2 |> dplyr::select(Genus, Species, FullScientificName, CommonName, tsn) |> distinct()
+
+#TC data
+names(TC.fish)
+
+#ID fish names that aren't in MPCA data
+
+TC.fish |> 
+  filter(!CommonName %in% mpca2$CommonName) |> dplyr::select(CommonName) |> distinct()
+
+#View(TC.fish |> filter(CommonName=="na goldfish"))
+
+#Check names used in MPCA dataset
+levels(factor(mpca2$CommonName))
+
+#define replacement names for some species to match mpca dataset
+
+replacements<-c(
+  "na goldfish" = "goldfish", 
+  "na walleye" = "walleye", 
+  "na logperch" = "logperch", 
+  "na bowfin" = "bowfin", 
+  "na drum" = "freshwater drum", 
+  "bluegill sunfish" = "bluegill", 
+  "pumpkinseed sunfish" = "pumpkinseed", 
+  "pumkinseed sunfish" = "pumpkinseed", 
+  "northern fathead minnow" = "fathead minnow", 
+  "iowa darter" = "Iowa darter")
+
+#format TC fish data and address fish names
+TC.fish2<-TC.fish |> 
+  rename(Number=Count) |> 
+  mutate(CommonName=tolower(CommonName)) |> 
+   #format species names to match mpca
+  mutate(CommonName = str_replace_all(CommonName, replacements)) |> 
+  left_join(taxonomy, by="CommonName") |> 
+  dplyr::select(Original_ID, Year, Agency, Genus, Species, FullScientificName, CommonName, tsn, Number, Latitude, Longitude,GearType, Date) |> 
+  #remove fish with no or ambiguous ID
+  filter(!CommonName=="unknown") |> filter(!is.na(CommonName)) |> 
+  filter(!CommonName=="bullhead") |>filter(!CommonName=="sucker") |> filter(!CommonName=="unknown shiner") |> 
+  mutate(Date=as.Date(Date))
+  
+
+#Check for fish names that didn't have match with mpca data
+TC.fish2 |> filter(is.na(Genus)) |> dplyr::select(CommonName) |> distinct()
+
+
+
+#View(TC.fish2)
+
+
 ```
 
 Merge data sources to same columns.
+
+ISSUE - LEFT OFF 11.9.26 - DUPLICATES INTRODUCED HERE
 
 ```{r}
 
 names(mpca2)
 names(nat2)
+names(TC.fish2)
 
+#Combine mpca and national data
 
 all.fish<-bind_rows(
   mpca2,
   nat2)
-  
+
+all.fish |> janitor::get_dupes() #no duplicates introduced here
 
 nrow(all.fish)
 
-View(all.fish)
+#View(all.fish)
 
 #Fill out missing data if names match
 
 #lookup table to match common names from mpca dataset to scientific names
+names(all.fish)
+
+#note discrepancies in capitalization for a few names: Johnny darter, White Sucker
+#and also blacknose dace sometimes listed as "western blacknose dace" 
+
 lookup <- all.fish %>%
+  #fix capitalization issues
+  mutate(CommonName=tolower(CommonName)) |> 
+  #fix blacknose dace
+  mutate(CommonName=ifelse(CommonName=="blacknose dace", "western blacknose dace", CommonName)) |> 
+  dplyr::select(Genus, Species, FullScientificName, CommonName) |>
+  distinct() |> 
   filter(!is.na(FullScientificName), !is.na(CommonName)) %>%
   distinct(FullScientificName, Name_filled = CommonName)
 lookup
 
-# 2. Join and fill missing values
+View(lookup)
+
+#Join and fill missing values
 all.fish2 <- all.fish %>%
   left_join(lookup, by = "FullScientificName") %>%
-  mutate(CommonName = coalesce(CommonName, Name_filled)) %>%
+  #mutate(CommonName = coalesce(CommonName, Name_filled)) %>%
+  mutate(CommonName = Name_filled) |> 
   select(-Name_filled)
 
-View(all.fish2 |> filter(!Agency=="MPCA"))
+nrow(all.fish)
+nrow(all.fish2)
+
+#Check for duplicates
+all.fish2 |> janitor::get_dupes()
+
+
+#View(all.fish2 |> filter(!Agency=="MPCA"))
 
 #check for any remaining missing names - species in USGS/USEPA datasets that are not in MPCA dataset 
 
 missing.common<-all.fish2 |> filter(is.na(CommonName))  |> dplyr::select(FullScientificName) |> distinct()
-
+missing.common
 nrow(all.fish2)
 
 CommonName.missing<-c(
-"Eastern blacknose dace",
-"Rosyface shiner",
-"Allegheny pearl dace",
-"American pickerel",
-"American brook lamprey",
-"Slender chub hybrid",
-"Silver shiner",
-"Blue catfish",
-"Greenside darter",
-"Orangethroat darter",
-"Dusky darter")
+"eastern blacknose dace",
+"rosyface shiner",
+"allegheny pearl dace",
+"american pickerel",
+"american brook lamprey",
+"slender chub hybrid",
+"silver shiner",
+"blue catfish",
+"greenside darter",
+"orangethroat darter",
+"dusky darter")
 
 missing.lookup<-cbind(missing.common, CommonName.missing)
 
@@ -224,54 +358,105 @@ all.fish3<-all.fish2 %>%
   left_join(missing.lookup, by = "FullScientificName") %>%
   mutate(CommonName = coalesce(CommonName, CommonName.missing)) %>%
   select(-CommonName.missing) |> 
+  #Capitalize names again
   mutate(CommonName=str_to_sentence(CommonName)) |> #capitalize all common names
 #remove NA values for number - checked and these were NA in original mpca data - no count
   filter(!is.na(Number))
 
-View(all.fish3 |> filter(FullScientificName %in% missing.common$FullScientificName))
+nrow(all.fish3) #a few rows dropped -- rows without Number
+all.fish2 |> filter(is.na(Number))
 
-View(all.fish3)
+#View(all.fish3 |> filter(FullScientificName %in% missing.common$FullScientificName))
+
+#View(all.fish3)
 
 #any missing data?
-View(all.fish3 |>  dplyr::select(-c(tsn,COMID))|> filter(if_any(everything(), is.na)))
+#View(all.fish3 |>  dplyr::select(-c(tsn,COMID))|> filter(if_any(everything(), is.na)))
 
 #there is a small number of rows of MPCA data for which GearType is not available, I think likely OK to assume electroshocking
 
+
+#Now add in TC data 
+all.fish.ALL<-bind_rows(all.fish3, TC.fish2)
+
+#View(all.fish.ALL)
+
+
+#Check for duplicates
+all.fish.ALL |> janitor::get_dupes()
 ```
 
 Quick map check:
 
 ```{r}
 
-all.fish_sf<-st_as_sf(all.fish3, coords=c("Longitude", "Latitude"), crs=4269, remove=FALSE)
+all.fish_sf<-st_as_sf(all.fish.ALL, coords=c("Longitude", "Latitude"), crs=4269, remove=FALSE)
 
 names(all.fish_sf)
 
-plot(all.fish_sf$geometry)
 
+
+
+#4 sites outside MN?
+
+states<-states()
+states_sf <- st_as_sf(states) #convert to sf object
+st_bbox(states_sf) #bounding box
+states_sf
+
+st_crs(states_sf) #check reference system
+
+#For area of interest, select states that overlap with sample locations
+
+MN<-states_sf %>% 
+  filter(STUSPS =="MN")
+
+
+tmap_mode("view")
+
+tm_shape(all.fish_sf |> dplyr::select(Latitude, Longitude) |> distinct())+
+  tm_dots()+
+  #tm_text(Original_ID)+
+  tm_shape(MN)+
+  tm_borders()
+
+plot(all.fish_sf$geometry)
 ```
 
-# Check for duplicates across datasets
+# Check for duplicate site/date combos across datasets
+
+Only checks for exact same lat/long combo and date
 
 ```{r}
 
-all.fish3 |> dplyr::select(Latitude, Longitude, Date, Agency) |> distinct() |> group_by(Latitude, Longitude, Date)|> count() |> filter(n>1)
+all.fish.ALL |> dplyr::select(Latitude, Longitude, Date, Agency) |> distinct() |> group_by(Latitude, Longitude, Date)|> count() |> filter(n>1)
 
+```
+
+Check for duplicate fish rows
+
+```{r}
+
+View(all.fish.ALL |> janitor::get_dupes())
 ```
 
 # Calculate Relative Abundance
 
+Deal with small inaccuracies in coordinate locations for the same sites by rounding coordinates to same number of digits, and only selecting one set of coordinates for slightly different measures of the same site
+
 ```{r}
 
 #Sum count by site/date
+names(all.fish.ALL)
 
-all.fish4<-all.fish3 |>
-  group_by(Original_ID, Date) |> 
+
+all.fish4<-all.fish.ALL |>
+  group_by(Original_ID, Latitude, Longitude, Date) |> 
   mutate(TotalCount=sum(Number)) |> 
   ungroup() |> 
   mutate(Relative_Abund=Number/TotalCount)
 
-View(all.fish4)
+#View(all.fish4)
 
 #save to file
 #exclude tsn and COMID for now (may want back later)

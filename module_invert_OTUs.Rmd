@@ -75,8 +75,8 @@ root.dir
 raw.dir<-paste0(root.dir, "/Data/biodata_raw")
 raw.dir
 
-#Output Data Directory for processed data:
-input.dir <- paste0(root.dir, "/Data/biodata_processing") 
+#Data Directory for pre-processed data:
+input.dir <- paste0(root.dir, "/Data/cleaned_input_data") 
 input.dir
 
 #Output directory for finalized taxonomic datasets
@@ -108,8 +108,11 @@ nat<-as.data.frame(fread(paste0(input.dir, "./USGS_EPA_Inverts_MN_long_finsync.c
 names(nat)
 #View(nat)
 
-TC<-read.csv(paste0(input.dir, "./TC_final_combined_data.csv"))
+TC<-read.csv(paste0(input.dir, "./TC_final_combined_data_macroinvertebrate.csv"))
 names(TC)
+
+
+levels(factor(TC$agency))
 
 ```
 
@@ -179,11 +182,14 @@ all.bugs<-bind_rows(
      dplyr::select(Original_ID, Date, Year, Agency, Original_Taxon, Number, Latitude, Longitude, Phylum, Class, Subclass, Order, Suborder, Family, Subfamily, Genus, replicate),
   
 TC %>% 
-    dplyr::rename(Original_ID=original_id, Year=year, Agency=agency, Original_Taxon=original_taxon, Number=number, Latitude=latitude, Longitude=longitude) %>%  #Capitalize column names
-    mutate(Date=as.Date(collection_date, format="%Y-%m-%d", origin = "1899-12-30")) %>% #format date
-    mutate(Phylum=NA) %>% 
-    rename(Class=class, Subclass=subclass, Order=order, Suborder=suborder, Family=family, Subfamily=subfamily, Genus=genus) %>%
-    dplyr::select(Original_ID, Date, Year, Agency, Original_Taxon, Number, Latitude, Longitude,Phylum, Class, Subclass, Order, Suborder, Family, Subfamily, Genus, replicate)
+  #Rename columns to match format of other datasets
+    dplyr::rename(Original_ID=original_id, Year=year, Agency=agency, Original_Taxon=original_taxon, Number=number, Latitude=latitude, Longitude=longitude, Family=family, Genus=genus, Date=date) %>% 
+  #format Date
+  mutate(Date=as.Date(Date)) |> 
+  #Add additional taxonomy columns
+  mutate(Phylum=NA, Class=NA, Subclass=NA, Order=NA, Suborder=NA, Subfamily=NA) %>% 
+  #Select desired columns  
+  dplyr::select(Original_ID, Date, Year, Agency, Original_Taxon, Number, Latitude, Longitude,Phylum, Class, Subclass, Order, Suborder, Family, Subfamily, Genus, replicate)
     
 )
 
@@ -193,6 +199,7 @@ nrow(all.bugs)
 levels(factor(all.bugs$Agency))
 
 #View(all.bugs)
+
 ```
 
 Eliminate rows with specimen count = 0.
@@ -213,7 +220,10 @@ all.bugs_sf<-st_as_sf(all.bugs, coords=c("Longitude", "Latitude"), crs=4269, rem
 
 names(all.bugs_sf)
 
-plot(all.bugs_sf$geometry)
+tmap_mode("view")
+
+tm_shape(all.bugs_sf |> dplyr::select(Original_ID) |> distinct())+
+  tm_dots()
 
 ```
 
@@ -364,6 +374,7 @@ all.bugs.clean<-all.bugs %>%
 #View(all.bugs.clean %>% dplyr::select(taxon_clean) %>% distinct())
 
 #Make the following changes for mis-spellings or reassignments based on matches below to mpca taxa list:
+#also "Sperchonidae" is replaced as an outdated spelling
 
 replacements <- c(
 "Helodidae" = "Scirtidae", 
@@ -381,7 +392,8 @@ replacements <- c(
 "Hydropsyche betteni" ="Hydropsyche",
 "Hydropsyche..betteni" ="Hydropsyche",
 "Baetis.." = "Baetis",
-"Baetis." = "Baetis"
+"Baetis." = "Baetis",
+"Sperchonidae" = "Sperchontidae"
 
 )
 
@@ -431,10 +443,10 @@ nrow(no.match) #210
 #View(no.match)
 
 #Taxa are unmatched taxa for different reasons:
-#-taxonomic ID to different resolution (eg, suborder, subfamily)
-#-mis-spellings
-#-lumped taxa
-#-genus IDs from the finsync data that are not in the MPCA taxa list
+#taxonomic ID to different resolution (eg, suborder, subfamily)
+#mis-spellings
+#lumped taxa
+#genus IDs from the finsync data that are not in the MPCA taxa list
 
 #Mis-spellings are more common in TC  dataset
 #A few mis-spellings in MPCA dataset
@@ -450,7 +462,7 @@ no.match<-all.bugs.clean %>%
   distinct() %>% 
   filter(!taxon_clean %in% mpca.list$Taxon) %>% 
   droplevels()
-nrow(no.match) #113
+nrow(no.match) #114
 #View(no.match)
 
 #Spelling match only for TC and MPCA data
@@ -490,7 +502,7 @@ min.dist <- spell.match1 %>%
 
 
 #How many matches were made?
-nrow(min.dist) #88 matches
+nrow(min.dist) #90 matches
 
 #Reviewed these matches manually, and made the fixes above, to max the taxa corrections and exclusions above 
 
@@ -536,7 +548,7 @@ View(spell.match1 %>% filter(is.na(Taxon))) #18 unmatched levels
 
 ## 2.5 Assemble full taxonomic hierarchy
 
-**Note: once this section is complete, you can skip to section 2.6 (merge taxonomy to occurrence data)**
+**Note: The approach we used is Option 2 (see section 2.5b - using the taxize package)**
 
 Add full taxonomic hierarchy for all taxa. For use in rolling up or grouping taxa later on.
 
@@ -607,7 +619,7 @@ ENTREZ API key: i hit a limit with how much data i could request, and received a
 
 - saved and restarted R
 
-Note: Once you have done this section once, you do not need to re-run and can skip to the next section
+**Note: Once you have done this section once, you do not need to re-run this entire section and can skip to 2.5.b v.**
 
 #### i. Exclude lumped taxa for now
 
@@ -694,7 +706,7 @@ nrow(tax.table)
 
 tax.table %>% filter(!is.na(genus)) %>% nrow()
 
-write.csv(tax.table.add, paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv"), row.names=FALSE)
+write.csv(tax.table, paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv"), row.names=FALSE)
 
 ```
 
@@ -707,6 +719,10 @@ I researched these taxa independently and reclassified them based on current res
 A separate set of taxa were not found in ITIS. I research these taxa independently and added taxonomic classification info to "taxonomy_for_taxa_with_incomplete_itis_record.xlsx". Note this list also included some reclassified taxa.
 
 ```{r}
+
+#load partial taxonomy table if needed
+tax.table<-as.data.frame(fread(paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv")))
+
 
 #Check for taxa with no additional taxonomic info added by ITIS, even though they were in database:
 
@@ -722,15 +738,16 @@ phylum
 
 still.missing.list
 
-#And, some taxa were not in ITIS at all: 
-#load partial taxonomy table if needed
-tax.table.add<-as.data.frame(fread(paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv")))
+#And, some taxa were not in ITIS at all - 
 
-#ID taxa with no taxonomic info so far: 
-no.match2<-all.bugs.clean3 %>% 
-    filter(!grepl("/", name)) %>% 
-    filter(!name %in% tax.table.add$name) %>% 
-    dplyr::select(name) %>% 
+#ID taxa with no taxonomic info so far:
+#(excluding lumped taxa)
+names(all.bugs.clean2)
+
+no.match2<-all.bugs.clean2 %>% 
+    filter(!grepl("/", taxon_clean2)) %>% 
+    filter(!taxon_clean2 %in% tax.table$name) %>% 
+    dplyr::select(taxon_clean2) %>% 
     distinct() %>% 
     droplevels()
 
@@ -738,6 +755,7 @@ no.match2
 
 ##Add in taxonomic info for both of these lists of taxa: 
 #These were researched independently by me in May/June 2026
+#Note that this also includes full upper taxonomy info for some taxa (annelids, mites, molluscs) that were incomplete in ITIS 
 
 add.info.itis <-read_excel(paste0(input.dir, "/taxonomy_for_taxa_with_incomplete_itis_record.xlsx"))
 
@@ -759,6 +777,12 @@ add.info.itis %>% dplyr::select(-c(name, reference, notes)) %>% rename(name=new_
 View(tax.table.add)
 
 
+#Add subclass 'Acari' for all mites in order 'Trombidiformes'
+
+tax.table.add<-tax.table.add |> 
+  mutate(subclass=ifelse(order=="Trombidiformes", "Acari", subclass))
+
+
 #write to file to save work
 
 write.csv(tax.table.add, paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv"), row.names=FALSE)
@@ -766,7 +790,7 @@ write.csv(tax.table.add, paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa
 
 ```
 
-#### iv. If you need to look up ITIS info for an additional set of taxa after the initial run (Otherwise skip):
+#### iv. look up ITIS info for an additional set of taxa added after the initial run:
 
 ```{r}
 
@@ -810,7 +834,13 @@ write.csv(tax.table2, paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_up
 
 #### v. Important! Replace taxa in dataset with reclassified names so far
 
+This section also adds more complete taxonomic hierarchy that was missing for a small subset of taxa from ITIS (namely, a subset of mostly Annelids, mites, and molluscs
+
 ```{r}
+
+#load partial taxonomy table if needed
+tax.table.add<-as.data.frame(fread(paste0(input.dir, "./full_taxonomic_hierarchy_most_taxa_updated.csv")))
+
 
 names(all.bugs.clean2)
 
@@ -850,10 +880,12 @@ View(all.bugs.clean3)
 #Check example taxa
 #old version:
 all.bugs.clean2 %>% filter(taxon_clean2=="Aedes")
+all.bugs.clean2 %>% filter(taxon_clean2=="Sperchontidae")
 #new version:
 all.bugs.clean3 %>% filter(name=="Aedes")
-
+all.bugs.clean3 %>% filter(name=="Sperchontidae")
 nrow(all.bugs.clean3)
+
 
 #Check for any remaining taxa without taxonomic info:
 #(excluding lumped taxa for now)
@@ -871,11 +903,13 @@ no.match2<-all.bugs.clean3 %>%
 no.match2
 
 #If no.match2 has 0 rows, all taxa (excluding lumped taxa) have classification info!
-
+#Lumped taxa are dealt with below
 
 ```
 
 ### 2.5.c Option 3: Using taxizedb (for large datasets)
+
+**Note: skip if using Option 2 above (section 2.5b)**
 
 Issues with taxize working slowly for large data requests, as it makes web requests for all quiers. Alternative: use taxizedb, which access a locally downloaded version of a database. However, classication tasks appear to require TSNs. See: <https://recology.info/2020/08/taxizedb-update/>
 
@@ -1091,7 +1125,6 @@ lump.hier<-merge(lump.ID %>% dplyr::select(name, lowest_common_designation),
 #View(lump.hier)
 nrow(lump.ID)
 nrow(lump.hier)
-names(tax.lump)
 
 
 
@@ -1157,6 +1190,8 @@ nrow(tax.table.CLEAN)
 
 #Write to file:
 write_xlsx(tax.table.CLEAN, paste0(input.dir, "/taxonomy_table_ALL_MACROINVERT_TAXA.xlsx"))
+
+
 ```
 
 ## 2.7 Merge full taxonomy to occurrence data
@@ -1168,9 +1203,9 @@ tax.table.CLEAN<-read_excel(paste0(input.dir, "/taxonomy_table_ALL_MACROINVERT_T
 
 #Are all names in count data present in the taxonomy table?
 
-all.bugs.clean3 %>% dplyr::select(name) %>% distinct %>% nrow() #903 taxa originally
+all.bugs.clean3 %>% dplyr::select(name) %>% distinct %>% nrow() #911 taxa originally
 
-all.bugs.clean4 %>% dplyr::select(name) %>% distinct %>% nrow() #796 taxa after lumping 
+all.bugs.clean4 %>% dplyr::select(name) %>% distinct %>% nrow() #802 taxa after lumping 
 
 #Check the missing (now lumped) taxa:
 View(all.bugs.clean3 %>% filter(!name %in% all.bugs.clean4$name) %>% dplyr::select(name) %>% distinct())
@@ -1192,11 +1227,15 @@ by=c("name"))
 nrow(all.bugs.clean4) - nrow(all.bugs.info1)
 #Should be 0 dropped or added rows!
 
+#If rows were dropped, find which ones
+setdiff(all.bugs.clean4 |> dplyr::select(Original_ID, Date, Original_Taxon), all.bugs.info1 |> dplyr::select(Original_ID, Date, Original_Taxon)
+)
+
 ```
 
 ## 2.8 Sum count by site and date, for replicates
 
-Note that some agencies (Carver County, SHEP) don't have date, and only have year. Did I assign a dummy date? –\> NO
+Note that some agencies (Carver County, SHEP) don't have date, and only have year. Dummy dates are assigned below.
 
 ```{r}
 
@@ -1231,7 +1270,9 @@ all.bugs.SUM<-all.bugs.date %>% group_by(Original_ID, Date, name) %>% mutate(Tot
     mutate(Total_ALL_specimens=sum(Total_Count))
 
 
-View(all.bugs.SUM)
+View(all.bugs.SUM |> filter(Original_ID=="06MS001"))
+
+#View(all.bugs.SUM)
 
 summary(all.bugs.SUM$Total_ALL_specimens)
 
@@ -1260,12 +1301,12 @@ all.bugs.SUM<-fread(paste0(input.dir, "/Aggregated_invert_raw_count_data_cleaned
 #(post rarification)
 sum(all.bugs.SUM$Total_Count)
 
-#2,622,798 = 2.6 million specimens!
+#2,951,990 = 2.6 million specimens!
 
 #How many unique sample site total
 
 Total.Sites<-all.bugs.SUM %>% dplyr::select(Latitude, Longitude) %>% distinct() %>% nrow()
-Total.Sites #4,737 unique sites sampled
+Total.Sites #5161 unique sites sampled
 
 #View number of sites sampled by Agency
 Sites.by.agency<-all.bugs.SUM %>% dplyr::select(Latitude, Longitude, Agency) %>% distinct() %>%
@@ -1373,6 +1414,8 @@ A second option is to make some kind of decisions here about taxa to keep/throw 
 
 ## 4.1 Calculate proportional abundance of finer/coarser resolution IDs per taxa across the entire dataset
 
+NOTE: SECTION 4.1 UNDER CONSTRUCTION - NOT FULLY FUNCTIONAL, as of 10.27.26
+
 ```{r}
 
 #What am i trying to do - 
@@ -1404,7 +1447,7 @@ ancestor_tbl <- all.bugs.SUM2 %>%
 
 View(ancestor_tbl %>% filter(finest_level=="genus"))
 
-##Step 3 Step 3: 
+# 
 #Self-join ancestor table to descendants
 
 
@@ -1435,7 +1478,7 @@ matches <- ancestor_tbl %>%
 View(matches)
 
 
-##Step 4: Keep only true descendants
+##Keep only true descendants
 
 #Join back to ancestor_tbl to determine whether the descendant actually contains the ancestor taxon.
 
@@ -1454,14 +1497,14 @@ matches <- matches %>%
 
 View(matches)
 
-##Step 5: Keep only finer descendants
+##Keep only finer descendants
 matches <- matches %>%
   filter(
     descendant_level_num >
       ancestor_level_num
   )
 
-##Step 6: Summarize finer abundance
+##Summarize finer abundance
 finer_abund <- matches %>%
   group_by(ancestor_record_id) %>%
   summarise(
@@ -1470,7 +1513,7 @@ finer_abund <- matches %>%
     .groups = "drop"
   )
 
-#Step 7: Final output
+#Final output
 
 #Restrict to coarse IDs if desired:
 #NOTE: currently looking at mixed IDs for genus and above
@@ -1510,13 +1553,14 @@ Rarefy to \<=300 specimens. Note that some samples have fewer than 300 specimens
 
 ```{r}
 
-#NOTE - NEEDS TO UPDATE TO CORRECT FILE HERE 
 #Read in raw count data if needed:
 all.bugs.SUM<-fread(paste0(input.dir, "/Aggregated_invert_raw_count_data_cleaned.csv"))
 
+#Look at example data for one site
+View(all.bugs.SUM |> filter(Original_ID=="06SC002"))
 
 #Look at min/median/mean/max values for existing raw counts:
-summary(all.bugs.SUM$Total_ALL_specimens)
+summary(all.bugs.SUM2$Total_ALL_specimens)
 
 
 #Code to rarefy is adapted from 'BackCalculation' vignette in finsyncR
@@ -1526,7 +1570,7 @@ rarefyCount = 300
 
 
 ##run the code to rarefy raw counts to the "rarefyCount" level
-names(all.bugs.SUM)
+names(all.bugs.SUM2)
 
 #check amount of time this takes
 Start.time<-Sys.time()
@@ -1535,7 +1579,9 @@ Start.time<-Sys.time()
 set.seed(1)
 
 
-rarified<-all.bugs.SUM %>%  
+rarified<-all.bugs.SUM %>%
+  #remove unneeded colum
+  dplyr::select(-c(V1)) |> 
 #remove all samples with fewer than rarefyCount specimen
  filter(Total_ALL_specimens >= rarefyCount) %>%
   dplyr::select(-c(Total_ALL_specimens, Total_replicates)) %>%
@@ -1566,7 +1612,7 @@ End.time<-Sys.time()
 
 End.time-Start.time
   
-View(rarified)
+View(rarified |> filter(Original_ID=="06SC002"))
 
 #Add back in data with <300 original specimen count
 
@@ -1577,11 +1623,11 @@ rarified.all<-bind_rows(
   rarified,
 
 #samples that did not need to be rarified:
-all.bugs.SUM %>% filter(Total_ALL_specimens<300) %>% mutate(RarifyCount=Total_Count) %>% rename(Total_ALL_specimens_rarified=Total_ALL_specimens) %>% dplyr::select(-Total_replicates)
+all.bugs.SUM %>% dplyr::select(-c(V1)) |> filter(Total_ALL_specimens<300) %>% mutate(RarifyCount=Total_Count) %>% rename(Total_ALL_specimens_rarified=Total_ALL_specimens) %>% dplyr::select(-Total_replicates)
 
 )
 
-View(rarified.all)
+View(rarified.all |> filter(Original_ID=="06SC002"))
 
 #Note that some sites have very low total abundance (<10), should I throw out data below a certain threshold?
 ```
@@ -1593,11 +1639,45 @@ View(rarified.all)
 Rel.abund<-rarified.all %>% 
   mutate(Relative_abundance=RarifyCount/Total_ALL_specimens_rarified)
 
-View(Rel.abund)
+#Add finest designation 
+#ID the finest taxonomic resolution for each taxonomic ID
+#i.e., Find the last taxonomic column that is not NA
+
+tax_levels <- c(
+  "phylum",
+  "class",
+  "subclass",
+  "order",
+  "suborder",
+  "family",
+  "subfamily",
+  "genus"
+)
+
+Rel.abund2 <- Rel.abund %>%
+  mutate(
+    record_id = row_number(),
+    level_num =
+      max.col(
+        !is.na(across(all_of(tax_levels))),
+        ties.method = "last"
+      ),
+    finest_level = tax_levels[level_num]
+  ) |> 
+  dplyr::select(-c(level_num, record_id))
+
+View(Rel.abund2)
+
+
+
+#Check example
+View(Rel.abund2 |> filter(Original_ID=="06SC002"))
+
+
 
 #Write to file
 
-write.csv(Rel.abund, paste0(taxa.dir, "/Macroinvert_MixedID_relative_abundance_rarified.csv"), row.names=FALSE)
+fwrite(Rel.abund2, paste0(taxa.dir, "/Macroinvert_MixedID_relative_abundance_rarified.csv"))
 
 
 ```
@@ -1614,15 +1694,22 @@ One issue is what to do with the large lumped group of Ephemeroptera taxa that d
 
 ```{r}
 
+#Read in raw count data if needed:
+all.bugs.SUM<-fread(paste0(input.dir, "/Aggregated_invert_raw_count_data_cleaned.csv"))
+
+#Assign finest level ID
+
+
+
 ###
 #What percentage of specimens have at least a family level ID or higher?
 
-total.specimens<-sum(all.bugs.SUM2$Total_Count)
+total.specimens<-sum(all.bugs.SUM$Total_Count)
 total.specimens
 
-View(all.bugs.SUM2)
+#View(all.bugs.SUM)
 
-Fam.ID.count<-all.bugs.SUM2 %>% 
+Fam.ID.count<-all.bugs.SUM %>% 
   filter(!is.na(family)) %>% 
   pull(Total_Count) %>% 
   sum()
@@ -1633,7 +1720,7 @@ Fam.ID.count/total.specimens #82%
 
 ###
 #Portion of specimens with a genus ID
-Genus.ID.count<-all.bugs.SUM2 %>% 
+Genus.ID.count<-all.bugs.SUM %>% 
   filter(!is.na(genus)) %>% 
   pull(Total_Count) %>% 
   sum()
@@ -1650,7 +1737,7 @@ Should only apply to large Ephemeroptera lumped group (Mahon et al., 2024)
 
 ```{r}
 
-names(all.bugs.SUM2)
+names(all.bugs.SUM)
 
 #Pull out genus names for lumped Ephemeroptera taxa
 ephem<-all.bugs.SUM2 %>% filter(grepl("Acentrella", name)) %>% dplyr::select(name) %>% distinct() %>% as.data.frame()
@@ -1711,17 +1798,19 @@ pattern <- matches$fam.lump
 pattern
 
 
-all.bugs.SUM3<-all.bugs.SUM2 %>% 
+all.bugs.SUM3<-all.bugs.SUM %>% 
 
   mutate(family = case_when(
     str_detect(family, pattern) ~ matches$fam.lump,
     TRUE ~ family # Keeps the original value if no match
   ))
 
-View(all.bugs.SUM3 %>% filter(name=="Baetis"))
+View(all.bugs.SUM |> filter(str_detect(name, "baetis")))
+View(all.bugs.SUM3 %>% filter(name=="baetis"))
+
 
 #Check no rows were dropped
-nrow(all.bugs.SUM3)-nrow(all.bugs.SUM3)
+nrow(all.bugs.SUM3)-nrow(all.bugs.SUM)
   
 ```
 
@@ -1730,13 +1819,13 @@ nrow(all.bugs.SUM3)-nrow(all.bugs.SUM3)
 ```{r}
 
 names(all.bugs.SUM3)
-#Note - drop suborder as some lumped emphemeroptera might have different suborders
+#Note! - drop suborder as some lumped emphemeroptera might have different suborders
 
 Fam.abund<-all.bugs.SUM3 %>% 
   filter(!is.na(family)) %>%
-  dplyr::select(Original_ID, Date, Year, Agency, Latitude, Longitude, phylum, class, order, family, Total_Count) %>% 
+  dplyr::select(Original_ID, Date, Year, Agency, Latitude, Longitude, phylum, class, subclass, order, family, Total_Count) %>% 
 #Calculate total counts by family for each site/date:  
-  group_by(Original_ID, Date, Year, Agency, Latitude, Longitude, phylum, class, order, family) %>% summarise(TotalCount_fam=sum(Total_Count)) %>% ungroup() %>% 
+  group_by(Original_ID, Date, Year, Agency, Latitude, Longitude, phylum, class, subclass, order, family) %>% summarise(TotalCount_fam=sum(Total_Count)) %>% ungroup() %>% 
 #calculate total abundance of all family level data for each site/date
   group_by(Original_ID, Date) %>% 
     mutate(Total_fam_specimens=sum(TotalCount_fam)) %>% 
@@ -1750,7 +1839,7 @@ View(Fam.abund %>% dplyr::select(Original_ID, Date, Year, Agency, Latitude, Long
 
 #-Note there are a few discrepancies with full classification info being inconsistent for a few IDs - should ID these!
 
-View(Fam.abund %>% filter(family=="Hygrobatidae"&Original_ID=="NRS_MN-10107"))
+View(all.bugs.SUM3 %>% filter(family=="Hygrobatidae"&Original_ID=="NRS_MN-10107"))
 
 View(Fam.abund)
 
@@ -1833,7 +1922,7 @@ rarified.fam$Rel_abund_fam=rarified.fam$FamRarifyCount/rarified.fam$Total_fam_AL
 View(rarified.fam)
 
 #Write rarified family level data to file 
-write_xlsx(rarified.fam, paste0(taxa.dir, "/Macroinvert_Family_relative_abundance_rarified.xlsx"))
+fwrite(rarified.fam, paste0(taxa.dir, "/Macroinvert_Family_relative_abundance_rarified.csv"))
 ```
 
 ## 5.5 Exploration of Family-level data
@@ -1958,12 +2047,12 @@ Genus.abund %>% filter(Total_ALL_specimens<300) %>% mutate(RarifyCount=Total_Cou
 #Note that some sites have very low total abundance (<10), should I throw out data below a certain threshold?
 
 #Calculate relative abundance
-rarified.genus$Rel_abund_fam=rarified.genus$RarifyCount/rarified.genus$Total_ALL_specimens_rarified
+rarified.genus$Rel_abund_genus=rarified.genus$RarifyCount/rarified.genus$Total_ALL_specimens_rarified
 
 View(rarified.genus)
 
 #Write rarified family level data to file 
-write_xlsx(rarified.genus, paste0(taxa.dir, "/Macroinvert_Genus_relative_abundance_rarified.xlsx"))
+fwrite(rarified.genus, paste0(taxa.dir, "/Macroinvert_Genus_relative_abundance_rarified.csv"))
 
 ```
 
